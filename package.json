@@ -1,10 +1,12 @@
 {
-  "name": "mcp-server",
-  "version": "0.0.1",
-  "description": "MCP server with packaged tools",
-  "main": "index.js",
+  "name": "repliers-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for the Repliers real estate API",
+  "main": "mcpServer.js",
   "type": "module",
   "scripts": {
+    "start": "node mcpServer.js",
+    "start:http": "node mcpServer.js --http",
     "list-tools": "node index.js tools"
   },
   "dependencies": {

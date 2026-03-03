@@ -1,91 +1,62 @@
 /**
- * Function to list geographical location data such as areas, cities, and neighborhoods.
+ * Repliers Locations Tool (legacy endpoint)
  *
- * @param {Object} args - Arguments for the location listing.
- * @param {string} [args.area] - Limits location metadata to areas matching the supplied value.
- * @param {string} [args.city] - Limits location metadata to cities matching the supplied value.
- * @param {string} [args.class] - Limits location metadata to classes matching the supplied value.
- * @param {string} [args.neighborhood] - Limits location metadata to neighborhoods matching the supplied value.
- * @param {string} [args.search] - Limits location metadata to areas, cities, or neighborhoods that match or partially match the supplied value.
- * @returns {Promise<Object>} - The result of the location listing.
+ * GET /listings/locations — returns a hierarchical list of areas, cities, and
+ * neighborhoods available in the MLS. All parameters are optional.
+ *
+ * For more powerful location search (locationId, boundary polygons, geospatial
+ * filtering), use search_locations instead.
  */
-const executeFunction = async ({ area, city, class: locationClass, neighborhood, search }) => {
-  const baseUrl = 'https://api.repliers.io';
-  const apiKey = process.env.REPLIERS_API_KEY;
-  try {
-    // Construct the URL with query parameters
-    const url = new URL(`${baseUrl}/listings/locations`);
-    if (area) url.searchParams.append('area', area);
-    if (city) url.searchParams.append('city', city);
-    if (locationClass) url.searchParams.append('class', locationClass);
-    if (neighborhood) url.searchParams.append('neighborhood', neighborhood);
-    if (search) url.searchParams.append('search', search);
 
-    // Set up headers for the request
-    const headers = {
-      'Accept': 'application/json',
-      'REPLIERS-API-KEY': apiKey
-    };
+import { BASE_URL, repliersGet } from "../../../lib/api-client.js";
 
-    // Perform the fetch request
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers
-    });
-
-    // Check if the response was successful
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData);
-    }
-
-    // Parse and return the response data
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.error('Error fetching location data:', error);
-    return { error: 'An error occurred while fetching location data.' };
-  }
+const executeFunction = async (args) => {
+  const url = new URL(`${BASE_URL}/listings/locations`);
+  if (args.area) url.searchParams.set("area", args.area);
+  if (args.city) url.searchParams.set("city", args.city);
+  if (args.class) url.searchParams.set("class", args.class);
+  if (args.neighborhood) url.searchParams.set("neighborhood", args.neighborhood);
+  if (args.search) url.searchParams.set("search", args.search);
+  return repliersGet(url);
 };
 
-/**
- * Tool configuration for listing geographical locations.
- * @type {Object}
- */
 const apiTool = {
   function: executeFunction,
   definition: {
-    type: 'function',
+    type: "function",
     function: {
-      name: 'list_locations',
-      description: 'List geographical location data such as areas, cities, and neighborhoods.',
+      name: "list_locations",
+      description:
+        "List MLS geographic locations (areas, cities, neighborhoods). All parameters are optional — call with no params to get the full hierarchy. Use the search param for partial-match lookup across all levels. For locationIds or boundary polygons, use search_locations instead.",
       parameters: {
-        type: 'object',
+        type: "object",
         properties: {
           area: {
-            type: 'string',
-            description: 'Limits location metadata to areas matching the supplied value.'
+            type: "string",
+            description: "Filter to areas matching this value",
           },
           city: {
-            type: 'string',
-            description: 'Limits location metadata to cities matching the supplied value.'
+            type: "string",
+            description: "Filter to cities matching this value",
           },
           class: {
-            type: 'string',
-            description: 'Limits location metadata to classes matching the supplied value.'
+            type: "string",
+            description: "Filter by listing class (e.g. 'condo', 'residential')",
           },
           neighborhood: {
-            type: 'string',
-            description: 'Limits location metadata to neighborhoods matching the supplied value.'
+            type: "string",
+            description: "Filter to neighborhoods matching this value",
           },
           search: {
-            type: 'string',
-            description: 'Limits location metadata to areas, cities, or neighborhoods that match or partially match the supplied value.'
-          }
-        }
-      }
-    }
-  }
+            type: "string",
+            description:
+              "Partial-match search across areas, cities, and neighborhoods simultaneously",
+          },
+        },
+        required: [],
+      },
+    },
+  },
 };
 
 export { apiTool };

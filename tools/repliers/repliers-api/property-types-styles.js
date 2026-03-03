@@ -1,60 +1,32 @@
 /**
- * Function to list property types and styles from the Repliers API.
+ * Repliers Property Types & Styles Tool
  *
- * @returns {Promise<Object>} - The result of the property types and styles request.
+ * GET /listings/property-types — returns the full reference list of property
+ * types and architectural styles available in the MLS.
  */
+
+import { BASE_URL, repliersGet } from "../../../lib/api-client.js";
+
 const executeFunction = async () => {
-  const baseUrl = 'https://api.repliers.io';
-  const apiKey = process.env.REPLIERS_API_KEY;
-  try {
-    // Construct the URL for the request
-    const url = `${baseUrl}/listings/property-types`;
-
-    // Set up headers for the request
-    const headers = {
-      'Accept': 'application/json',
-      'REPLIERS-API-KEY': apiKey
-    };
-
-    // Perform the fetch request
-    const response = await fetch(url, {
-      method: 'GET',
-      headers
-    });
-
-    // Check if the response was successful
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData);
-    }
-
-    // Parse and return the response data
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.error('Error fetching property types and styles:', error);
-    return { error: 'An error occurred while fetching property types and styles.' };
-  }
+  const url = new URL(`${BASE_URL}/listings/property-types`);
+  return repliersGet(url);
 };
 
-/**
- * Tool configuration for listing property types and styles from the Repliers API.
- * @type {Object}
- */
 const apiTool = {
   function: executeFunction,
   definition: {
-    type: 'function',
+    type: "function",
     function: {
-      name: 'list_property_types_and_styles',
-      description: 'List property types and styles from the Repliers API.',
+      name: "list_property_types_and_styles",
+      description:
+        "List all available MLS property types and architectural styles. No parameters required. Use this to discover valid values for the propertyType and style filters in repliers_listings_search.",
       parameters: {
-        type: 'object',
+        type: "object",
         properties: {},
-        required: []
-      }
-    }
-  }
+        required: [],
+      },
+    },
+  },
 };
 
 export { apiTool };

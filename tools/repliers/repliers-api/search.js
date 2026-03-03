@@ -1,122 +1,32 @@
 /**
- * Comprehensive Repliers API Listings Search Tool
- * Fixed version that properly handles map parameter and body/query separation
+ * Repliers Listings Search Tool
+ *
+ * GET /listings (or POST /listings when map or imageSearchItems are provided).
+ * All params go under a params object; pageNum and resultsPerPage are top-level.
  */
 
+import { BASE_URL, repliersGet, repliersPost, appendParams, withMetadata } from "../../../lib/api-client.js";
+
 const executeFunction = async (args) => {
-  const baseUrl = "https://api.repliers.io";
-  const apiKey = process.env.REPLIERS_API_KEY;
-  const defaultResultsPerPage = parseInt(process.env.RESULTS_PER_PAGE) || 20;
-  let finalUrl;
+  const url = new URL(`${BASE_URL}/listings`);
+  const bodyParams = {};
 
-  if (!apiKey) {
-    throw new Error("REPLIERS_API_KEY environment variable is not set");
+  if (args.params) {
+    const { imageSearchItems, map, ...queryParams } = args.params;
+    if (imageSearchItems && Array.isArray(imageSearchItems)) bodyParams.imageSearchItems = imageSearchItems;
+    if (map) bodyParams.map = map;
+    appendParams(url, queryParams);
   }
 
-  try {
-    // Construct base URL
-    const url = new URL(`${baseUrl}/listings`);
+  if (args.pageNum !== undefined) url.searchParams.set("pageNum", String(args.pageNum));
+  const rpp = args.resultsPerPage || parseInt(process.env.RESULTS_PER_PAGE) || 20;
+  url.searchParams.set("resultsPerPage", String(rpp));
 
-    // Separate body parameters from query parameters
-    const bodyParams = {};
-
-    // Handle special parameter serialization
-    if (args.params) {
-      const { imageSearchItems, map, ...queryParams } = args.params;
-
-      // ImageSearchItems always goes in body when present
-      if (imageSearchItems && Array.isArray(imageSearchItems)) {
-        bodyParams.imageSearchItems = imageSearchItems;
-      }
-
-      // Map parameter goes in body when present (triggers POST)
-      if (map) {
-        bodyParams.map = map;
-      }
-
-      // Process all other parameters as query parameters
-      Object.entries(queryParams).forEach(([key, value]) => {
-        if (value !== undefined && value !== null) {
-          if (Array.isArray(value)) {
-            value.forEach((item) => {
-              url.searchParams.append(key, String(item));
-            });
-          } else if (typeof value === "boolean") {
-            url.searchParams.set(key, String(value));
-          } else {
-            url.searchParams.set(key, String(value));
-          }
-        }
-      });
-    }
-
-    // Add pagination parameters (these are query params, not in the params object)
-    if (args.pageNum !== undefined) {
-      url.searchParams.set("pageNum", String(args.pageNum));
-    }
-    // Use explicit resultsPerPage if provided, otherwise use environment variable
-    const resultsPerPage = args.resultsPerPage || defaultResultsPerPage;
-    url.searchParams.set("resultsPerPage", String(resultsPerPage));
-
-    // Capture final URL
-    finalUrl = url.toString();
-
-    // Set headers
-    const headers = {
-      Accept: "application/json",
-      "REPLIERS-API-KEY": apiKey,
-    };
-
-    // Determine if we need to send a body
-    const hasBodyParams = Object.keys(bodyParams).length > 0;
-
-    if (hasBodyParams) {
-      headers["Content-Type"] = "application/json";
-    }
-
-    // Execute request
-    const response = await fetch(finalUrl, {
-      method: hasBodyParams ? "POST" : "GET",
-      headers,
-      ...(hasBodyParams && { body: JSON.stringify(bodyParams) }),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      return {
-        url: finalUrl,
-        method: hasBodyParams ? "POST" : "GET",
-        status: response.status,
-        error: errorData.error || "API request failed",
-        details: errorData.details || errorData,
-      };
-    }
-
-    const data = await response.json();
-    return {
-      url: finalUrl,
-      method: hasBodyParams ? "POST" : "GET",
-      status: response.status,
-      data: {
-        ...data,
-        _metadata: {
-          totalResults: data.count || 0,
-          totalPages: data.numPages || 0,
-          currentPage: data.pagination?.currentPage || args.pageNum || 1,
-          resultsPerPage:
-            data.pagination?.resultsPerPage || resultsPerPage || defaultResultsPerPage,
-        },
-      },
-    };
-  } catch (error) {
-    console.error("Repliers API error:", error);
-    return {
-      url: finalUrl,
-      error: "Network or processing error",
-      details: error.message,
-    };
-  }
+  const hasBody = Object.keys(bodyParams).length > 0;
+  const result = hasBody ? await repliersPost(url, bodyParams) : await repliersGet(url);
+  return withMetadata(result, args.pageNum, rpp);
 };
+
 
 const repliersListingsSearchTool = {
   function: executeFunction,
@@ -142,7 +52,7 @@ const repliersListingsSearchTool = {
                 type: "array",
                 items: { type: "string" },
                 description:
-                  "Filter by the address state of the listing, for example 'NY'",
+                  "Filter by the address state of the listing, for example 'ON' or 'NY'",
               },
               area: {
                 type: "string",
@@ -154,6 +64,12 @@ const repliersListingsSearchTool = {
                 items: { type: "string" },
                 description:
                   "Filters listings where either the address.area or address.city field matches any of the provided values",
+              },
+              cityOrDistrict: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  "Filters listings where either the address.city or address.district field matches any of the provided values",
               },
               neighborhood: {
                 type: "array",
@@ -167,8 +83,19 @@ const repliersListingsSearchTool = {
                   "Filter by the geographical district of the listing",
               },
               zip: {
+                type: "array",
+                items: { type: "string" },
+                description: "Filters listings by one or more postal or zip codes",
+              },
+              locationId: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  "Filters listings by one or more locationId values (from the locations_autocomplete or search_locations tools)",
+              },
+              addressKey: {
                 type: "string",
-                description: "Filters listings by postal or zip code",
+                description: "The address key of the property (unique address identifier)",
               },
               zoning: {
                 type: "string",
@@ -336,6 +263,14 @@ const repliersListingsSearchTool = {
                 type: "number",
                 description: "Maximum number of bathrooms",
               },
+              minBathroomsHalf: {
+                type: "number",
+                description: "Minimum number of half bathrooms",
+              },
+              maxBathroomsHalf: {
+                type: "number",
+                description: "Maximum number of half bathrooms",
+              },
               minKitchens: {
                 type: "number",
                 description: "Minimum number of kitchens",
@@ -343,6 +278,26 @@ const repliersListingsSearchTool = {
               maxKitchens: {
                 type: "number",
                 description: "Maximum number of kitchens",
+              },
+
+              // Stories
+              minStories: {
+                type: "number",
+                description: "Filter listings whose number of stories is >= this value",
+              },
+              maxStories: {
+                type: "number",
+                description: "Filter listings whose number of stories is <= this value",
+              },
+
+              // Lot size
+              minLotSizeSqft: {
+                type: "number",
+                description: "Minimum lot size in square feet",
+              },
+              maxLotSizeSqft: {
+                type: "number",
+                description: "Maximum lot size in square feet",
               },
 
               // Size parameters
@@ -385,6 +340,10 @@ const repliersListingsSearchTool = {
                 type: "number",
                 description: "Minimum parking spaces",
               },
+              maxParkingSpaces: {
+                type: "number",
+                description: "Maximum parking spaces",
+              },
               garage: {
                 type: "array",
                 items: { type: "string" },
@@ -406,6 +365,12 @@ const repliersListingsSearchTool = {
                 type: "array",
                 items: { type: "string" },
                 description: "Filter by amenities like 'Gym', 'Swimming Pool'",
+              },
+              amenitiesOperator: {
+                type: "string",
+                enum: ["AND", "OR"],
+                description:
+                  "AND = listing must have all specified amenities; OR = listing must have at least one (default: OR)",
               },
               swimmingPool: {
                 type: "array",
@@ -457,6 +422,28 @@ const repliersListingsSearchTool = {
                 enum: ["Y", "N"],
                 description:
                   "Y = waterfront listings, N = non-waterfront listings",
+              },
+
+              // Standard status (RESO standard)
+              standardStatus: {
+                type: "array",
+                items: {
+                  type: "string",
+                  enum: [
+                    "Active",
+                    "Active Under Contract",
+                    "Canceled",
+                    "Closed",
+                    "Coming Soon",
+                    "Delete",
+                    "Expired",
+                    "Hold",
+                    "Incomplete",
+                    "Pending",
+                    "Withdrawn",
+                  ],
+                },
+                description: "Filter by RESO standard status values",
               },
 
               // Status and type
@@ -545,6 +532,33 @@ const repliersListingsSearchTool = {
                   "true = only listings with agents, false = only listings without agents",
               },
 
+              // Price change filters
+              lastPriceChangeType: {
+                type: "string",
+                enum: ["decrease", "increase"],
+                description: "Filter listings that had a price decrease or increase",
+              },
+              minPriceChangeDateTime: {
+                type: "string",
+                format: "date",
+                description: "Listings with a price change on or after this date (YYYY-MM-DD)",
+              },
+              maxPriceChangeDateTime: {
+                type: "string",
+                format: "date",
+                description: "Listings with a price change on or before this date (YYYY-MM-DD)",
+              },
+
+              // Days on market filters (status=U only)
+              minDaysOnMarket: {
+                type: "number",
+                description: "Filter status=U listings with days on market >= this value",
+              },
+              maxDaysOnMarket: {
+                type: "number",
+                description: "Filter status=U listings with days on market <= this value",
+              },
+
               // Date filters
               listDate: {
                 type: "string",
@@ -616,6 +630,16 @@ const repliersListingsSearchTool = {
                 description:
                   "Listings with open house on or before this date (YYYY-MM-DD)",
               },
+              minClosedDate: {
+                type: "string",
+                format: "date",
+                description: "Listings with a close date on or after this date (YYYY-MM-DD)",
+              },
+              maxClosedDate: {
+                type: "string",
+                format: "date",
+                description: "Listings with a close date on or before this date (YYYY-MM-DD)",
+              },
               repliersUpdatedOn: {
                 type: "string",
                 format: "date",
@@ -678,8 +702,22 @@ const repliersListingsSearchTool = {
               // Sorting
               sortBy: {
                 type: "string",
+                enum: [
+                  "createdOnDesc", "createdOnAsc",
+                  "updatedOnDesc", "updatedOnAsc",
+                  "repliersUpdatedOnDesc", "repliersUpdatedOnAsc",
+                  "listPriceDesc", "listPriceAsc",
+                  "soldPriceDesc", "soldPriceAsc",
+                  "soldDateDesc", "soldDateAsc",
+                  "sqftDesc", "sqftAsc",
+                  "bedsDesc", "bedsAsc",
+                  "bathsDesc", "bathsAsc",
+                  "yearBuiltDesc", "yearBuiltAsc",
+                  "distanceAsc", "distanceDesc",
+                  "random",
+                ],
                 description:
-                  "Sort attribute (default: updatedOnDesc). Use distanceAsc/Desc with lat/long/radius",
+                  "Sort order (default: updatedOnDesc). Use distanceAsc/Desc with lat/long/radius",
               },
 
               // Response customization
@@ -690,14 +728,31 @@ const repliersListingsSearchTool = {
               },
               coverImage: {
                 type: "string",
-                enum: ["image", "text"],
-                description: "Change cover image using AI-powered feature",
+                enum: [
+                  "kitchen",
+                  "powder room",
+                  "ensuite",
+                  "family room",
+                  "exterior front",
+                  "backyard",
+                  "staircase",
+                  "primary bedroom",
+                  "laundry room",
+                  "office",
+                  "garage",
+                ],
+                description:
+                  "AI-powered cover image selection — reorders images so the specified room type appears first. Requires Image Insights subscription upgrade.",
               },
 
               // Aggregation and clustering
               aggregates: {
                 type: "string",
-                description: "Aggregate values/counts for specified fields",
+                description: "Aggregate values/counts for specified fields (e.g. 'address.neighborhood', 'address.city')",
+              },
+              aggregatesUnique: {
+                type: "string",
+                description: "Unique aggregates for comma-separated value fields",
               },
               aggregateStatistics: {
                 type: "boolean",
@@ -705,14 +760,25 @@ const repliersListingsSearchTool = {
               },
               statistics: {
                 type: "string",
-                description: `Request real-time market statistics. MUST BE USED when user asks for: average, mean, median, min, max, sum, total, or any statistical calculation.
-                              Format: Comma-separated field names (e.g., 'listPrice,soldPrice,daysOnMarket')
-                              Returns: min, max, avg, median, sum, count for each field
+                description: `Request real-time market statistics. MUST BE USED when user asks for averages, medians, trends, or any statistical calculation.
+                              Format: Comma-separated stat codes (NOT raw field names).
+
+                              Valid stat codes:
+                              - Price (active or sold): avg-listPrice, med-listPrice, min-listPrice, max-listPrice, sum-listPrice
+                              - Sold price (requires status=["U"]): avg-soldPrice, med-soldPrice, min-soldPrice, max-soldPrice, sum-soldPrice
+                              - Days on market (requires status=["U"]): avg-daysOnMarket, med-daysOnMarket, min-daysOnMarket, max-daysOnMarket, sd-daysOnMarket
+                              - Counts: cnt-available, cnt-new, cnt-closed
+                              - Time grouping: grp-mth, grp-yr, grp-day, grp-7-days, grp-30-days, grp-60-days, grp-90-days, grp-180-days, grp-365-days
+                              - Other: pct-aboveBelowList (requires status=["U"]), avg-priceSqft, avg-tax, med-tax, min-sqft, max-sqft, avg-maintenanceFee, med-maintenanceFee
+                              - Std deviation: sd-listPrice, sd-soldPrice
+
+                              IMPORTANT: Stats involving soldPrice, daysOnMarket, or pct-aboveBelowList require status=["U"] (sold/unavailable listings).
+
                               Examples:
-                              - "calculate median price" → statistics: "listPrice"
-                              - "average days on market" → statistics: "daysOnMarket"
-                              - "price statistics" → statistics: "listPrice"
-                              Can be grouped by aggregates when aggregateStatistics=true`,
+                              - "median list price" → statistics: "med-listPrice"
+                              - "average days on market" → statistics: "avg-daysOnMarket" (+ status: ["U"])
+                              - "monthly price trend" → statistics: "grp-mth,med-soldPrice,avg-soldPrice,cnt-closed" (+ status: ["U"])
+                              - "price stats by neighborhood" → statistics: "avg-listPrice" + aggregates: "address.neighborhood" + aggregateStatistics: true`,
               },
               cluster: {
                 type: "boolean",
@@ -729,6 +795,13 @@ const repliersListingsSearchTool = {
                 maximum: 200,
                 description:
                   "Limit clusters returned when 'map' in aggregates (1-200)",
+              },
+              clusterListingsThreshold: {
+                type: "number",
+                minimum: 1,
+                maximum: 100,
+                description:
+                  "Max cluster size at which individual listings are included in cluster response (1-100)",
               },
               clusterPrecision: {
                 type: "number",

@@ -1,82 +1,37 @@
 /**
- * Function to get a listing using the MLS number and board ID from the Repliers API.
+ * Repliers Get Listing Tool
  *
- * @param {Object} args - Arguments for getting the listing.
- * @param {string} args.mlsNumber - The MLS number of the listing to retrieve.
- * @param {number} [args.boardId] - Filter by boardId if required.
- * @returns {Promise<Object>} - The result of getting the listing.
+ * GET /listings/{mlsNumber} — retrieves full details for a single listing
+ * by its MLS number.
  */
+
+import { BASE_URL, repliersGet } from "../../../lib/api-client.js";
+
 const executeFunction = async (args) => {
-  const baseUrl = "https://api.repliers.io";
-  const apiKey = process.env.REPLIERS_API_KEY;
-  let finalUrl; // Declare here to use in error handling
-
-  try {
-    // Construct the URL with the MLS number and optional board ID, required if the account has access to more than one board
-    const url = new URL(`${baseUrl}/listings`);
-    if (args.boardId) {
-      url.searchParams.set("boardId", args.boardId);
-    }
-    url.pathname += `/${args.mlsNumber}`;
-
-    // Set up headers for the request
-    const headers = {
-      Accept: "application/json",
-      "REPLIERS-API-KEY": apiKey,
-    };
-
-    finalUrl = url.toString(); // Capture the final URL
-
-    // Perform the fetch request
-    const response = await fetch(finalUrl, {
-      method: "GET",
-      headers,
-    });
-
-    // Check if the response was successful
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(JSON.stringify(errorData));
-    }
-
-    // Parse and return the response data
-    const data = await response.json();
-    return {
-      url: finalUrl,
-      data
-    };
-  } catch (error) {
-    console.error("Error getting the listing:", error);
-    return {
-      error: "An error occurred while getting the listing.",
-      details: error.message,
-      url: finalUrl
-    };
-  }
+  const url = new URL(`${BASE_URL}/listings/${args.mlsNumber}`);
+  if (args.boardId) url.searchParams.set("boardId", String(args.boardId));
+  return repliersGet(url);
 };
 
-/**
- * Tool configuration for getting a listing using the Repliers API.
- * @type {Object}
- */
 const apiTool = {
   function: executeFunction,
   definition: {
     type: "function",
     function: {
       name: "get_listing",
-      description: "Get a listing using the MLS.",
+      description:
+        "Retrieve full details for a single MLS listing by its MLS number. Returns all listing fields including price, address, rooms, features, images, and history. Use this when you already know a specific mlsNumber.",
       parameters: {
         type: "object",
         properties: {
           mlsNumber: {
             type: "string",
-            description: "The MLS number of the listing you wish to retrieve.",
+            description: "The MLS number of the listing to retrieve (e.g. 'C12345678')",
           },
           boardId: {
             type: "number",
             description:
-              "Filter by boardId. This is only required if your account has access to more than one MLS.",
+              "Board ID — only required if your account has access to more than one MLS board",
           },
         },
         required: ["mlsNumber"],

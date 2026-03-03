@@ -1,114 +1,66 @@
 /**
- * Function to find similar listings using the Repliers API.
+ * Repliers Find Similar Listings Tool
  *
- * @param {Object} args - Arguments for finding similar listings.
- * @param {string} args.mlsNumber - The MLS number of the listing to find similar listings for.
- * @param {number[]} [args.boardId] - Filter by one or more board IDs.
- * @param {string} [args.fields] - Limit the response to specific fields (e.g., "listPrice,soldPrice" or "images[5]").
- * @param {number} [args.listPriceRange] - Returns similar listings within a price range (e.g., 250000 for +/- $250,000).
- * @param {number} [args.radius] - Show similar listings within a specified radius in kilometers.
- * @param {string} [args.sortBy] - Sort similar listings by a specific field (e.g., "updatedOnDesc", "createdOnAsc").
- * @returns {Promise<Object>} - The result of finding similar listings.
+ * GET /listings/{mlsNumber}/similar — returns listings that are similar to the
+ * given listing based on location, price, and property type.
  */
+
+import { BASE_URL, repliersGet } from "../../../lib/api-client.js";
+
 const executeFunction = async (args) => {
-  const baseUrl = 'https://api.repliers.io';
-  const apiKey = process.env.REPLIERS_API_KEY;
-
-  try {
-    // Construct the URL for finding similar listings
-    const url = new URL(`${baseUrl}/listings/${args.mlsNumber}/similar`);
-
-    // Add query parameters if provided
-    if (args.boardId) {
-      args.boardId.forEach((id) => url.searchParams.append('boardId', id));
-    }
-    if (args.fields) {
-      url.searchParams.set('fields', args.fields);
-    }
-    if (args.listPriceRange) {
-      url.searchParams.set('listPriceRange', args.listPriceRange);
-    }
-    if (args.radius) {
-      url.searchParams.set('radius', args.radius);
-    }
-    if (args.sortBy) {
-      url.searchParams.set('sortBy', args.sortBy);
-    }
-
-    // Set up headers for the request
-    const headers = {
-      'Accept': 'application/json',
-      'REPLIERS-API-KEY': apiKey
-    };
-
-    // Perform the fetch request
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers
-    });
-
-    // Check if the response was successful
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(JSON.stringify(errorData));
-    }
-
-    // Parse and return the response data
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.error('Error finding similar listings:', error);
-    return { error: 'An error occurred while finding similar listings.' };
-  }
+  const url = new URL(`${BASE_URL}/listings/${args.mlsNumber}/similar`);
+  if (args.boardId) args.boardId.forEach((id) => url.searchParams.append("boardId", id));
+  if (args.fields) url.searchParams.set("fields", args.fields);
+  if (args.listPriceRange) url.searchParams.set("listPriceRange", String(args.listPriceRange));
+  if (args.radius) url.searchParams.set("radius", String(args.radius));
+  if (args.sortBy) url.searchParams.set("sortBy", args.sortBy);
+  return repliersGet(url);
 };
 
-/**
- * Tool configuration for finding similar listings using the Repliers API.
- * @type {Object}
- */
 const apiTool = {
   function: executeFunction,
   definition: {
-    type: 'function',
+    type: "function",
     function: {
-      name: 'find_similar_listings',
-      description: 'Find similar listings using the MLS number.',
+      name: "find_similar_listings",
+      description:
+        "Find listings similar to a given MLS listing. Returns up to 20 comparable properties based on location, price, and property characteristics. Note: may return empty results for brand-new listings that have just been posted.",
       parameters: {
-        type: 'object',
+        type: "object",
         properties: {
           mlsNumber: {
-            type: 'string',
-            description: 'The MLS number of the listing to find similar listings for.'
+            type: "string",
+            description: "MLS number of the reference listing",
           },
           boardId: {
-            type: 'array',
-            items: {
-              type: 'number'
-            },
-            description: 'Filter by one or more board IDs.'
+            type: "array",
+            items: { type: "number" },
+            description: "Filter by one or more board IDs",
           },
           fields: {
-            type: 'string',
-            description: 'Limit the response to specific fields (e.g., "listPrice,soldPrice" or "images[5]").'
+            type: "string",
+            description:
+              'Limit response fields (e.g. "listPrice,soldPrice" or "images[5]")',
           },
           listPriceRange: {
-            type: 'number',
-            description: 'Returns similar listings within a price range (e.g., 250000 for +/- $250,000).'
+            type: "number",
+            description:
+              "Return listings within +/- this price range in dollars (e.g. 250000)",
           },
           radius: {
-            type: 'number',
-            description: 'Show similar listings within a specified radius in kilometers.'
+            type: "number",
+            description: "Restrict results to within this radius in kilometres",
           },
           sortBy: {
-            type: 'string',
-            description: 'Sort similar listings by a specific field (e.g., "updatedOnDesc", "createdOnAsc").',
-            enum: ['updatedOnDesc', 'updatedOnAsc', 'createdOnAsc', 'createdOnDesc']
-          }
+            type: "string",
+            enum: ["updatedOnDesc", "updatedOnAsc", "createdOnAsc", "createdOnDesc"],
+            description: "Sort order for results",
+          },
         },
-        required: ['mlsNumber']
-      }
-    }
-  }
+        required: ["mlsNumber"],
+      },
+    },
+  },
 };
 
 export { apiTool };

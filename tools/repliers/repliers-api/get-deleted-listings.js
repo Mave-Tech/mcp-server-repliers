@@ -1,81 +1,48 @@
 /**
- * Function to retrieve deleted listings from the Repliers API.
+ * Repliers Deleted Listings Tool
  *
- * @param {Object} args - Arguments for the request.
- * @param {string} args.updatedOn - The date when the listing was updated.
- * @param {string} args.minUpdatedOn - The minimum date for updated listings.
- * @param {string} args.maxUpdatedOn - The maximum date for updated listings.
- * @returns {Promise<Object>} - The response from the Repliers API containing deleted listings.
+ * GET /listings/deleted — retrieves listings that have been removed from the MLS
+ * within a given date range. Useful for syncing a local database.
  */
-const executeFunction = async ({ updatedOn, minUpdatedOn, maxUpdatedOn }) => {
-  const baseUrl = 'https://api.repliers.io';
-  const apiKey = process.env.REPLIERS_API_KEY;
 
-  try {
-    // Construct the URL with query parameters
-    const url = new URL(`${baseUrl}/listings/deleted`);
-    url.searchParams.append('updatedOn', updatedOn);
-    url.searchParams.append('minUpdatedOn', minUpdatedOn);
-    url.searchParams.append('maxUpdatedOn', maxUpdatedOn);
+import { BASE_URL, repliersGet } from "../../../lib/api-client.js";
 
-    // Set up headers for the request
-    const headers = {
-      'Accept': 'application/json',
-      'REPLIERS-API-KEY': apiKey
-    };
-
-    // Perform the fetch request
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers
-    });
-
-    // Check if the response was successful
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData);
-    }
-
-    // Parse and return the response data
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.error('Error retrieving deleted listings:', error);
-    return { error: 'An error occurred while retrieving deleted listings.' };
-  }
+const executeFunction = async (args) => {
+  const url = new URL(`${BASE_URL}/listings/deleted`);
+  if (args.updatedOn) url.searchParams.set("updatedOn", args.updatedOn);
+  if (args.minUpdatedOn) url.searchParams.set("minUpdatedOn", args.minUpdatedOn);
+  if (args.maxUpdatedOn) url.searchParams.set("maxUpdatedOn", args.maxUpdatedOn);
+  return repliersGet(url);
 };
 
-/**
- * Tool configuration for retrieving deleted listings from the Repliers API.
- * @type {Object}
- */
 const apiTool = {
   function: executeFunction,
   definition: {
-    type: 'function',
+    type: "function",
     function: {
-      name: 'get_deleted_listings',
-      description: 'Retrieve deleted listings from the Repliers API.',
+      name: "get_deleted_listings",
+      description:
+        "Retrieve MLS listings that were deleted within a date range. Useful for keeping a local database in sync. Provide at least one date filter (updatedOn for an exact date, or minUpdatedOn/maxUpdatedOn for a range). Dates must be YYYY-MM-DD format.",
       parameters: {
-        type: 'object',
+        type: "object",
         properties: {
           updatedOn: {
-            type: 'string',
-            description: 'The date when the listing was updated.'
+            type: "string",
+            description: "Exact deletion date (YYYY-MM-DD)",
           },
           minUpdatedOn: {
-            type: 'string',
-            description: 'The minimum date for updated listings.'
+            type: "string",
+            description: "Range start date (YYYY-MM-DD)",
           },
           maxUpdatedOn: {
-            type: 'string',
-            description: 'The maximum date for updated listings.'
-          }
+            type: "string",
+            description: "Range end date (YYYY-MM-DD)",
+          },
         },
-        required: ['updatedOn', 'minUpdatedOn', 'maxUpdatedOn']
-      }
-    }
-  }
+        required: ["updatedOn", "minUpdatedOn", "maxUpdatedOn"],
+      },
+    },
+  },
 };
 
 export { apiTool };

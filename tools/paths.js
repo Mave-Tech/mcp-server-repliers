@@ -7,4 +7,10 @@ export const toolPaths = [
   'repliers/repliers-api/get-a-listing.js',
   'repliers/repliers-api/find-similar-listings.js',
   'repliers/repliers-api/search.js',
+  'repliers/repliers-api/nlp-search.js',
+  'repliers/repliers-api/get-places.js',
+  'repliers/repliers-api/locations-autocomplete.js',
+  'repliers/repliers-api/search-locations.js',
+  'repliers/repliers-api/search-offices.js',
+  'repliers/repliers-api/get-nlp-history.js',
 ];
