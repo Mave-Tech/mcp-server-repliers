@@ -162,10 +162,15 @@ async function runHTTP() {
   const app = express();
   app.use(express.json());
 
-  // Ensure Accept header includes both required MIME types for MCP SDK compatibility
-  app.post("/mcp", (req, res, next) => {
-    const accept = req.headers.accept || "";
-    if (!accept.includes("text/event-stream")) {
+  // Health check endpoint for Railway
+  app.get("/health", (req, res) => {
+    res.json({ status: "ok", service: SERVER_NAME, version: SERVER_VERSION });
+  });
+
+  // Ensure Accept header compatibility for MCP SDK validation
+  // mcporter and some clients don't send the required Accept header
+  app.use("/mcp", (req, res, next) => {
+    if (req.method === "POST") {
       req.headers.accept = "application/json, text/event-stream";
     }
     next();

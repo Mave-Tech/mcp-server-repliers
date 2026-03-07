@@ -10,7 +10,7 @@
     "list-tools": "node index.js tools"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.9.0",
+    "@modelcontextprotocol/sdk": "1.11.2",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
     "express": "^5.1.0"
