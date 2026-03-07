@@ -19,7 +19,7 @@ const executeFunction = async (args) => {
   }
 
   if (args.pageNum !== undefined) url.searchParams.set("pageNum", String(args.pageNum));
-  const rpp = args.resultsPerPage || parseInt(process.env.RESULTS_PER_PAGE) || 20;
+  const rpp = args.resultsPerPage || parseInt(process.env.RESULTS_PER_PAGE) || 10;
   url.searchParams.set("resultsPerPage", String(rpp));
 
   const hasBody = Object.keys(bodyParams).length > 0;

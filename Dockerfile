@@ -1,9 +1,12 @@
-FROM node:22.12-alpine AS builder
+FROM node:22-alpine
 
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.json ./
 RUN npm install
 
 COPY . .
 
-ENTRYPOINT ["node", "mcpServer.js"]
+ENV PORT=8080
+EXPOSE 8080
+
+ENTRYPOINT ["node", "mcpServer.js", "--http"]
