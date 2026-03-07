@@ -12,6 +12,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { discoverTools } from "./lib/tools.js";
+import { trimResponse } from "./lib/response-trimmer.js";
 
 dotenv.config();
 
@@ -97,15 +98,32 @@ async function setupHandlers(server, tools) {
         };
       }
 
+      // Preserve top-level fields (nlpId, translatedUrl, summary) alongside trimmed data.
+      // Some tools (e.g. nlp_search) return { nlpId, summary, data: {...} } — we need all of it.
+      const rawData = result.data ?? result;
+      const trimmedData = trimResponse(rawData);
+
+      // Collect any top-level tool fields that aren't 'data', 'url', 'status'
+      const extraFields = {};
+      for (const [k, v] of Object.entries(result)) {
+        if (!['data', 'url', 'status'].includes(k) && v !== undefined) {
+          extraFields[k] = v;
+        }
+      }
+
+      const finalData = Object.keys(extraFields).length > 0
+        ? { ...extraFields, ...trimmedData }
+        : trimmedData;
+
       return {
         content: [
           {
             type: "text",
-            text: `API Endpoint: ${result.url}`,
+            text: `API Endpoint: ${result.url || result.translatedUrl || 'N/A'}`,
           },
           {
             type: "text",
-            text: JSON.stringify(result.data ?? result, null, 2),
+            text: JSON.stringify(finalData, null, 2),
           },
         ],
       };
@@ -143,6 +161,15 @@ async function runHTTP() {
   const tools = await discoverTools();
   const app = express();
   app.use(express.json());
+
+  // Ensure Accept header includes both required MIME types for MCP SDK compatibility
+  app.post("/mcp", (req, res, next) => {
+    const accept = req.headers.accept || "";
+    if (!accept.includes("text/event-stream")) {
+      req.headers.accept = "application/json, text/event-stream";
+    }
+    next();
+  });
 
   // Stateless streamable HTTP — a new transport per request (no session state)
   app.post("/mcp", async (req, res) => {
