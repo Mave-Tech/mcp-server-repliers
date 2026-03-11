@@ -8,16 +8,45 @@
 import { BASE_URL, repliersGet } from "../../../lib/api-client.js";
 
 const executeFunction = async (args) => {
-  const url = new URL(`${BASE_URL}/listings`);
-  url.searchParams.set("city", args.city);
-  url.searchParams.set("streetName", args.streetName);
-  url.searchParams.set("streetNumber", args.streetNumber);
-  url.searchParams.set("zip", args.zip);
-  url.searchParams.set("status", "A,U");  // include both active and historical (sold/terminated/expired)
-  if (args.unitNumber) url.searchParams.set("unitNumber", args.unitNumber);
-  if (args.streetSuffix) url.searchParams.set("streetSuffix", args.streetSuffix);
-  if (args.streetDirection) url.searchParams.set("streetDirection", args.streetDirection);
-  return repliersGet(url);
+  // Repliers API only accepts a single status value, so we call twice (A + U) and merge.
+  // status=A → active listings at this address
+  // status=U → historical: sold, terminated, expired
+  const buildUrl = (status) => {
+    const url = new URL(`${BASE_URL}/listings`);
+    url.searchParams.set("city", args.city);
+    url.searchParams.set("streetName", args.streetName);
+    url.searchParams.set("streetNumber", args.streetNumber);
+    url.searchParams.set("zip", args.zip);
+    url.searchParams.set("status", status);
+    if (args.unitNumber) url.searchParams.set("unitNumber", args.unitNumber);
+    if (args.streetSuffix) url.searchParams.set("streetSuffix", args.streetSuffix);
+    if (args.streetDirection) url.searchParams.set("streetDirection", args.streetDirection);
+    return url;
+  };
+
+  // Run both in parallel
+  const [activeResult, historicalResult] = await Promise.all([
+    repliersGet(buildUrl("A")),
+    repliersGet(buildUrl("U")),
+  ]);
+
+  // Merge listings, deduplicate by mlsNumber
+  const allListings = [
+    ...(activeResult.listings || []),
+    ...(historicalResult.listings || []),
+  ];
+  const seen = new Set();
+  const merged = allListings.filter((l) => {
+    if (seen.has(l.mlsNumber)) return false;
+    seen.add(l.mlsNumber);
+    return true;
+  });
+
+  return {
+    ...historicalResult,
+    count: merged.length,
+    listings: merged,
+  };
 };
 
 const apiTool = {
