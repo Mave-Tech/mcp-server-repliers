@@ -13,6 +13,7 @@ const executeFunction = async (args) => {
   url.searchParams.set("streetName", args.streetName);
   url.searchParams.set("streetNumber", args.streetNumber);
   url.searchParams.set("zip", args.zip);
+  url.searchParams.set("status", "A,U");  // include both active and historical (sold/terminated/expired)
   if (args.unitNumber) url.searchParams.set("unitNumber", args.unitNumber);
   if (args.streetSuffix) url.searchParams.set("streetSuffix", args.streetSuffix);
   if (args.streetDirection) url.searchParams.set("streetDirection", args.streetDirection);
