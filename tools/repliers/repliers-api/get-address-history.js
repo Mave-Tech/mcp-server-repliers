@@ -16,7 +16,9 @@ const executeFunction = async (args) => {
     url.searchParams.set("city", args.city);
     url.searchParams.set("streetName", args.streetName);
     url.searchParams.set("streetNumber", args.streetNumber);
-    url.searchParams.set("zip", args.zip);
+    // zip is optional — omitting it broadens the search and avoids zip mismatch
+    // across listing records for the same property
+    if (args.zip) url.searchParams.set("zip", args.zip);
     url.searchParams.set("status", status);
     if (args.unitNumber) url.searchParams.set("unitNumber", args.unitNumber);
     if (args.streetSuffix) url.searchParams.set("streetSuffix", args.streetSuffix);
@@ -56,7 +58,7 @@ const apiTool = {
     function: {
       name: "get_address_history",
       description:
-        "Retrieve the complete MLS listing history for a specific property address. Returns all past and current listings at that address. Requires city, streetName, streetNumber, and zip. Use unitNumber for condos/apartments.",
+        "Retrieve the complete MLS listing history for a specific property address (active + sold + terminated + expired). Returns all past and current listings. CRITICAL: streetName must NOT include the suffix — Repliers stores suffixes (Ave, Rd, Blvd, Hill, Dr, Lane, Park, etc.) separately. Always use address.streetName from a prior listing result, or strip the suffix manually. Examples: '9 Peveril Hill S' → streetName='Peveril', streetSuffix='Hill', streetDirection='S'. '295 Strathmore Blvd' → streetName='Strathmore', streetSuffix='Blvd'. '191 Glen Cedar Rd' → streetName='Glen Cedar', streetSuffix='Rd'. zip is optional — omit it to avoid zip mismatch across listing records.",
       parameters: {
         type: "object",
         properties: {
@@ -66,7 +68,7 @@ const apiTool = {
           },
           streetName: {
             type: "string",
-            description: "Street name without suffix or direction (e.g. 'Yonge', 'King')",
+            description: "Street name WITHOUT suffix or direction. Repliers stores Ave/Rd/Blvd/Hill/Park/Lane/Dr etc. in streetSuffix — do NOT include them here. Use address.streetName from a listing result directly. Examples: 'Yonge', 'King', 'Rushton', 'Peveril' (not 'Peveril Hill'), 'Strathmore' (not 'Strathmore Blvd'), 'Glen Cedar' (not 'Glen Cedar Rd')",
           },
           streetNumber: {
             type: "string",
@@ -74,7 +76,7 @@ const apiTool = {
           },
           zip: {
             type: "string",
-            description: "Postal/zip code (e.g. 'M5V 2T6')",
+            description: "Postal/zip code (e.g. 'M5V 2T6'). Optional — omit to avoid zip mismatch across listing records for the same property.",
           },
           unitNumber: {
             type: "string",
@@ -89,7 +91,7 @@ const apiTool = {
             description: "Street direction (e.g. 'N', 'S', 'E', 'W')",
           },
         },
-        required: ["city", "streetName", "streetNumber", "zip"],
+        required: ["city", "streetName", "streetNumber"],
       },
     },
   },
