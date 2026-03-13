@@ -35,7 +35,7 @@ const repliersListingsSearchTool = {
     function: {
       name: "repliers_listings_search",
       description:
-        "Comprehensive property search using Repliers API with all supported parameters. Most parameters are sent as query parameters (GET request). imageSearchItems and map parameters trigger a POST request with body parameters.",
+        "Primary tool for searching Canadian MLS listings (active, sold, leased, terminated, expired). All filters go inside a 'params' object and ALL filter values must be arrays (e.g. city: ['Toronto'], status: ['A']). Use statistics codes (avg-soldPrice, med-daysOnMarket, etc.) for market analytics. IMPORTANT: For sold-price/DOM/pct-aboveBelowList stats, always set status: ['U']. Add listings: false when you only need statistics to reduce response size. imageSearchItems and map parameters trigger a POST request.",
       parameters: {
         type: "object",
         properties: {
@@ -870,7 +870,7 @@ const repliersListingsSearchTool = {
             type: "number",
             minimum: 1,
             maximum: 100,
-            description: "Number of results per page (default: 100, max: 100)",
+            description: "Number of results per page (default: 10, max: 100). Keep low when you only need stats (listings: false). Set higher when returning listings to the user.",
           },
         },
         required: [],

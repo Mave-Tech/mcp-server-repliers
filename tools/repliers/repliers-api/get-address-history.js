@@ -32,11 +32,13 @@ const executeFunction = async (args) => {
     repliersGet(buildUrl("U")),
   ]);
 
-  // Merge listings, deduplicate by mlsNumber
+  // Merge listings from both responses — note: repliersGet wraps data under .data
   const allListings = [
-    ...(activeResult.listings || []),
-    ...(historicalResult.listings || []),
+    ...(activeResult.data?.listings || []),
+    ...(historicalResult.data?.listings || []),
   ];
+
+  // Deduplicate by mlsNumber (active and historical can overlap)
   const seen = new Set();
   const merged = allListings.filter((l) => {
     if (seen.has(l.mlsNumber)) return false;
@@ -44,10 +46,16 @@ const executeFunction = async (args) => {
     return true;
   });
 
+  // Return properly wrapped so the MCP server's response trimmer sees data.listings
+  const baseData = historicalResult.data || {};
   return {
-    ...historicalResult,
-    count: merged.length,
-    listings: merged,
+    url: historicalResult.url,
+    status: historicalResult.status,
+    data: {
+      ...baseData,
+      listings: merged,
+      count: merged.length,
+    },
   };
 };
 
