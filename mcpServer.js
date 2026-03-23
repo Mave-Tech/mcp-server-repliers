@@ -167,6 +167,17 @@ async function runHTTP() {
     res.json({ status: "ok", service: SERVER_NAME, version: SERVER_VERSION });
   });
 
+  // API key authentication middleware — applies to all /mcp requests
+  if (process.env.MCP_API_KEY) {
+    app.use("/mcp", (req, res, next) => {
+      const apiKey = req.headers["x-api-key"];
+      if (!apiKey || apiKey !== process.env.MCP_API_KEY) {
+        return res.status(401).json({ error: "Unauthorized: invalid or missing X-API-Key header" });
+      }
+      next();
+    });
+  }
+
   // Ensure Accept header compatibility for MCP SDK validation
   // mcporter and some clients don't send the required Accept header
   app.use("/mcp", (req, res, next) => {
