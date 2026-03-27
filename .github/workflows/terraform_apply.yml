@@ -1,0 +1,750 @@
+name: Terraform Apply
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: 'Environment to deploy (e.g., dev, production)'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      GIT_INFRA_DEPLOY_KEY:
+        required: true
+      SLACK_FAILURE_WEBHOOK_URL:
+        required: false
+      SLACK_BOT_TOKEN:
+        required: false
+      SLACK_CHANNEL_ID:
+        required: false
+      SLACK_SUCCESS_WEBHOOK_URL:
+        required: false
+
+jobs:
+  terraform-apply:
+    runs-on: ubuntu-latest
+    env:
+      TG_MODULE_SOURCE: "git::git@github.com:mave-tech/infrastructure.git"
+      GIT_HASH: ${{ github.sha }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        lfs: true
+
+    - name: Create SSH key and start ssh-agent
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.GIT_INFRA_DEPLOY_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        eval "$(ssh-agent -s)"
+        ssh-keygen -y -f ~/.ssh/id_rsa > /dev/null || (echo "Invalid private key format" && exit 1)
+        ssh-add ~/.ssh/id_rsa
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+    - name: Setup AWS Profile
+      run: |
+        mkdir -p ~/.aws
+        echo "[mave]" >> ~/.aws/credentials
+        echo "aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}" >> ~/.aws/credentials
+        echo "aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> ~/.aws/credentials
+        echo "[profile mave]" >> ~/.aws/config
+        echo "region=us-east-1" >> ~/.aws/config
+        echo "output=json" >> ~/.aws/config
+
+    - name: Install Terraform
+      uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: 1.9.5
+
+    - name: Install Terragrunt
+      run: |
+        sudo wget -q -O /usr/local/bin/terragrunt "https://github.com/gruntwork-io/terragrunt/releases/download/v0.66.9/terragrunt_linux_amd64"
+        sudo chmod +x /usr/local/bin/terragrunt
+
+    - name: Prepare Paths
+      id: paths
+      env:
+        INPUT_ENV: ${{ inputs.environment }}
+      run: |
+        echo "TOP_LEVEL=$INPUT_ENV" >> $GITHUB_OUTPUT
+
+        if [[ "$INPUT_ENV" == "production" ]]; then
+          echo "INNER_NAME=prod" >> $GITHUB_OUTPUT
+        else
+          echo "INNER_NAME=$INPUT_ENV" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Apply Secrets First
+      working-directory: terraform/${{ steps.paths.outputs.TOP_LEVEL }}/us-east-1/${{ steps.paths.outputs.INNER_NAME }}_secrets
+      run: terragrunt apply -auto-approve --terragrunt-non-interactive 2>&1 | tee /tmp/terraform_output.txt; exit ${PIPESTATUS[0]}
+
+    - name: Run Terragrunt Apply
+      working-directory: terraform/${{ inputs.environment }}
+      run: |
+        INNER_NAME="${{ steps.paths.outputs.INNER_NAME }}"
+        terragrunt run-all apply -auto-approve --terragrunt-non-interactive \
+          --terragrunt-exclude-dir "${INNER_NAME}_secrets" \
+          2>&1 | tee -a /tmp/terraform_output.txt; exit ${PIPESTATUS[0]}
+
+    - name: Infrastructure Apply Summary
+      if: always()
+      env:
+        INPUT_ENV: ${{ inputs.environment }}
+        GH_SHA: ${{ github.sha }}
+        GH_SERVER: ${{ github.server_url }}
+        GH_REPO: ${{ github.repository }}
+        GH_RUN_ID: ${{ github.run_id }}
+      run: |
+        ENV="$INPUT_ENV"
+        SHORT_SHA="$GH_SHA"
+        SHORT_SHA="${SHORT_SHA:0:7}"
+        COMMIT_URL="$GH_SERVER/$GH_REPO/commit/$GH_SHA"
+        JOB_URL="$GH_SERVER/$GH_REPO/actions/runs/$GH_RUN_ID"
+        if [ "$ENV" = "production" ]; then BADGE="🔴 production"; else BADGE="🟡 $ENV"; fi
+
+        TOTAL_ADD=0; TOTAL_CHANGE=0; TOTAL_DESTROY=0
+        CHANGED_MODULES=0; NO_CHANGE_MODULES=0
+        CURRENT_MODULE="secrets"
+
+        # Per-resource tracking (for attribute collection)
+        CUR_RES=""; CUR_RES_ICON=""; CUR_RES_ATTRS=""; CUR_RES_MOD=""; CUR_RES_NAME=""
+
+        # Associative arrays: aggregate counts per unique module name
+        declare -A MOD_ADD MOD_CHANGE MOD_DESTROY MOD_RES MOD_PENDING
+        declare -a MODULE_ORDER
+
+        _flush_resource() {
+          [ -z "$CUR_RES" ] && return
+          local m="${CUR_RES_MOD:-$CURRENT_MODULE}"
+          local display="${CUR_RES_NAME:-$CUR_RES}"
+          MOD_PENDING[$m]+="$CUR_RES_ICON|$display|$CUR_RES_ATTRS"$'\n'
+          CUR_RES=""; CUR_RES_ICON=""; CUR_RES_ATTRS=""; CUR_RES_MOD=""; CUR_RES_NAME=""
+        }
+
+        _RE_PREFIX1='prefix=\[([^]]+)\]'
+        _RE_PREFIX2='[[:blank:]]prefix=([^[:space:]]*/[^[:space:]]+)'
+        _RE_RES='#[[:space:]]([a-z][a-z0-9_]*\.[[:alnum:]_-]+)[[:space:]]+(will be created|will be updated in-place|will be destroyed|must be replaced)'
+        _RE_MOD_PATH='\[([^]]+/[^]]+)\]'
+        _RE_IMAGE='~[[:space:]]image[[:space:]]+=[[:space:]]+"[^"]*:([a-zA-Z0-9._-]+)"[[:space:]]*->[[:space:]]*"[^"]*:([a-zA-Z0-9._-]+)"'
+        _RE_ATTR='[[:blank:]](~)[[:blank:]]([a-z][a-z0-9_]+)[[:blank:]]+=[[:blank:]].*->'
+        _RE_FAMILY='\+[[:blank:]]family[[:blank:]]+=[[:blank:]]+"([^"]+)"'
+        _RE_APPLY_BR='\[([^]]+/[^]]*)\][[:space:]]+Apply complete![[:space:]]Resources:[[:space:]]([0-9]+) added, ([0-9]+) changed, ([0-9]+) destroyed'
+        _RE_APPLY_PIPE='^([[:alnum:]][[:alnum:]_-]*)[[:space:]]+\|[[:space:]]Apply complete![[:space:]]Resources:[[:space:]]([0-9]+) added, ([0-9]+) changed, ([0-9]+) destroyed'
+        _RE_PREFIX_PIPE='^([[:alnum:]][[:alnum:]_-]*)[[:space:]]+\|'
+        _RE_APPLY_PLAIN='Apply complete![[:space:]]Resources:[[:space:]]([0-9]+) added, ([0-9]+) changed, ([0-9]+) destroyed'
+        _RE_NO_CHANGE='No changes\.'
+
+        if [ -f /tmp/terraform_output.txt ]; then
+          while IFS= read -r line; do
+            if [[ "$line" =~ $_RE_PREFIX1 ]]; then
+              CURRENT_MODULE=$(basename "${BASH_REMATCH[1]}")
+            elif [[ "$line" =~ $_RE_PREFIX2 ]]; then
+              CURRENT_MODULE=$(basename "${BASH_REMATCH[1]}")
+            elif [[ "$line" =~ $_RE_PREFIX_PIPE ]]; then
+              CURRENT_MODULE="${BASH_REMATCH[1]}"
+            fi
+
+            if [[ "$line" =~ $_RE_RES ]]; then
+              SAVED_RES="${BASH_REMATCH[1]}"; SAVED_OP="${BASH_REMATCH[2]}"
+              if [[ "$line" =~ $_RE_MOD_PATH ]]; then
+                CURRENT_MODULE=$(basename "${BASH_REMATCH[1]}")
+              fi
+              _flush_resource
+              CUR_RES="$SAVED_RES"; CUR_RES_ATTRS=""; CUR_RES_MOD="$CURRENT_MODULE"
+              case "$SAVED_OP" in
+                "will be created")          CUR_RES_ICON="➕" ;;
+                "will be updated in-place") CUR_RES_ICON="🔄" ;;
+                "will be destroyed")        CUR_RES_ICON="🗑️" ;;
+                *)                          CUR_RES_ICON="🔀" ;;
+              esac
+              continue
+            fi
+
+            if [ -n "$CUR_RES" ]; then
+              if [[ "$line" =~ $_RE_FAMILY ]]; then
+                CUR_RES_NAME="${BASH_REMATCH[1]}"
+              elif [[ "$line" =~ $_RE_IMAGE ]]; then
+                OLD_TAG="${BASH_REMATCH[1]:0:7}"; NEW_TAG="${BASH_REMATCH[2]:0:7}"
+                [ "$OLD_TAG" != "$NEW_TAG" ] && CUR_RES_ATTRS="image: \`$OLD_TAG\`→\`$NEW_TAG\`"
+              elif [[ "$line" =~ $_RE_ATTR ]]; then
+                ATTR="${BASH_REMATCH[2]}"
+                case "$ATTR" in
+                  id|arn|tags_all|revision|last_updated|last_modified|etag|checksum) ;;
+                  *)
+                    if [ -z "$CUR_RES_ATTRS" ]; then
+                      CUR_RES_ATTRS="$ATTR"
+                    elif ! echo "$CUR_RES_ATTRS" | grep -qF "$ATTR"; then
+                      CUR_RES_ATTRS="$CUR_RES_ATTRS, $ATTR"
+                    fi
+                  ;;
+                esac
+              fi
+            fi
+
+            if [[ "$line" =~ $_RE_APPLY_BR ]]; then
+              MOD=$(basename "${BASH_REMATCH[1]}"); ADD="${BASH_REMATCH[2]}"; CHANGE="${BASH_REMATCH[3]}"; DESTROY="${BASH_REMATCH[4]}"
+            elif [[ "$line" =~ $_RE_APPLY_PIPE ]]; then
+              MOD="${BASH_REMATCH[1]}"; ADD="${BASH_REMATCH[2]}"; CHANGE="${BASH_REMATCH[3]}"; DESTROY="${BASH_REMATCH[4]}"
+            elif [[ "$line" =~ $_RE_APPLY_PLAIN ]]; then
+              MOD="$CURRENT_MODULE"; ADD="${BASH_REMATCH[1]}"; CHANGE="${BASH_REMATCH[2]}"; DESTROY="${BASH_REMATCH[3]}"
+            else
+              if [[ "$line" =~ $_RE_NO_CHANGE ]]; then
+                NO_CHANGE_MODULES=$((NO_CHANGE_MODULES + 1))
+                NC_MOD=""
+                if   [[ "$line" =~ $_RE_APPLY_BR ]]; then NC_MOD=$(basename "${BASH_REMATCH[1]}")
+                elif [[ "$line" =~ $_RE_MOD_PATH ]]; then NC_MOD=$(basename "${BASH_REMATCH[1]}")
+                fi
+                [ -z "$NC_MOD" ] && NC_MOD="$CURRENT_MODULE"
+                if [ -n "$NC_MOD" ] && [ -z "${MOD_ADD[$NC_MOD]+x}" ]; then
+                  MODULE_ORDER+=("$NC_MOD")
+                  MOD_ADD[$NC_MOD]=0; MOD_CHANGE[$NC_MOD]=0; MOD_DESTROY[$NC_MOD]=0
+                fi
+              fi
+              continue
+            fi
+
+            _flush_resource
+            MOD_RES[$MOD]+="${MOD_PENDING[$MOD]:-}"
+            unset 'MOD_PENDING[$MOD]'
+
+            TOTAL_ADD=$((TOTAL_ADD + ADD)); TOTAL_CHANGE=$((TOTAL_CHANGE + CHANGE)); TOTAL_DESTROY=$((TOTAL_DESTROY + DESTROY))
+
+            if [ -z "${MOD_ADD[$MOD]+x}" ]; then
+              MODULE_ORDER+=("$MOD")
+            fi
+            MOD_ADD[$MOD]=$(( ${MOD_ADD[$MOD]:-0} + ADD ))
+            MOD_CHANGE[$MOD]=$(( ${MOD_CHANGE[$MOD]:-0} + CHANGE ))
+            MOD_DESTROY[$MOD]=$(( ${MOD_DESTROY[$MOD]:-0} + DESTROY ))
+
+          done < /tmp/terraform_output.txt
+        fi
+
+        # ── Fallback: grep-based resource recovery ─────────────────────────────
+        declare -A _GLOBAL_RES_ICON
+        declare -a _GLOBAL_RES_ORDER
+        _RE_OP='will be (created|updated in-place|destroyed)|must be replaced'
+        while IFS= read -r resline; do
+          [[ "$resline" =~ $_RE_RES ]] || continue
+          rname="${BASH_REMATCH[1]}"
+          [ -n "${_GLOBAL_RES_ICON[$rname]+x}" ] && continue
+          case "${BASH_REMATCH[2]}" in
+            "will be created")          _GLOBAL_RES_ICON[$rname]="➕" ;;
+            "will be updated in-place") _GLOBAL_RES_ICON[$rname]="🔄" ;;
+            "will be destroyed")        _GLOBAL_RES_ICON[$rname]="🗑️" ;;
+            *)                          _GLOBAL_RES_ICON[$rname]="🔀" ;;
+          esac
+          _GLOBAL_RES_ORDER+=("$rname")
+        done < <(grep -E "$_RE_OP" /tmp/terraform_output.txt 2>/dev/null | sort -u || true)
+
+        _GLOBAL_IMAGE_ATTR=""
+        while IFS= read -r iline; do
+          if [[ "$iline" =~ $_RE_IMAGE ]]; then
+            OLD_TAG="${BASH_REMATCH[1]:0:7}"; NEW_TAG="${BASH_REMATCH[2]:0:7}"
+            [ "$OLD_TAG" != "$NEW_TAG" ] && _GLOBAL_IMAGE_ATTR="image: \`$OLD_TAG\`→\`$NEW_TAG\`" && break
+          fi
+        done < /tmp/terraform_output.txt
+
+        for MOD in "${MODULE_ORDER[@]}"; do
+          [ -n "${MOD_RES[$MOD]:-}" ] && continue
+          TOTAL=$(( ${MOD_ADD[$MOD]:-0} + ${MOD_CHANGE[$MOD]:-0} + ${MOD_DESTROY[$MOD]:-0} ))
+          [ "$TOTAL" -eq 0 ] && continue
+
+          while IFS= read -r resline; do
+            [[ "$resline" =~ $_RE_RES ]] || continue
+            rname="${BASH_REMATCH[1]}"
+            case "${BASH_REMATCH[2]}" in
+              "will be created")          icon="➕" ;;
+              "will be updated in-place") icon="🔄" ;;
+              "will be destroyed")        icon="🗑️" ;;
+              *)                          icon="🔀" ;;
+            esac
+            MOD_RES[$MOD]+="$icon|$rname|"$'\n'
+          done < <(grep -E "(/${MOD}\]|^${MOD}[[:space:]]+\|)" /tmp/terraform_output.txt 2>/dev/null \
+            | grep -E "$_RE_OP" | sort -u || true)
+
+          if [ -z "${MOD_RES[$MOD]:-}" ] && [ "${#_GLOBAL_RES_ORDER[@]}" -gt 0 ]; then
+            for rname in "${_GLOBAL_RES_ORDER[@]}"; do
+              icon="${_GLOBAL_RES_ICON[$rname]}"
+              attrs=""
+              [[ "$rname" == *"task_definition"* ]] && attrs="$_GLOBAL_IMAGE_ATTR"
+              MOD_RES[$MOD]+="$icon|$rname|$attrs"$'\n'
+            done
+          fi
+        done
+
+        # ── Parse Outputs blocks → actual service names & task def revisions ──────
+        declare -A _SVC_TD
+        declare -a _SVC_ORDER
+        _in_out=false; _cur_svc=""; _cur_td=""
+        _img_change=""
+
+        while IFS= read -r line; do
+          if [ -z "$_img_change" ] && [[ "$line" =~ ~[[:space:]]+image[[:space:]]+=.*:([a-f0-9]{7})[a-f0-9]+\"[[:space:]]*-\>.*:([a-f0-9]{7})[a-f0-9]+ ]]; then
+            _img_change="${BASH_REMATCH[1]}→${BASH_REMATCH[2]}"
+          fi
+          if [[ "$line" == "Outputs:" ]]; then
+            _in_out=true; _cur_svc=""; _cur_td=""
+          elif [ "$_in_out" = true ]; then
+            if [[ "$line" =~ ecs_service_id[[:space:]]*=[[:space:]]*\"(.+)\" ]]; then
+              _cur_svc=$(basename "${BASH_REMATCH[1]}")
+            elif [[ "$line" =~ task_definition_arn[[:space:]]*=[[:space:]]*\"(.+)\" ]]; then
+              _cur_td=$(basename "${BASH_REMATCH[1]}")
+            elif [[ -z "${line// }" ]] && [ -n "$_cur_svc" ] && [ -z "${_SVC_TD[$_cur_svc]+x}" ]; then
+              _SVC_TD["$_cur_svc"]="$_cur_td"
+              _SVC_ORDER+=("$_cur_svc")
+              _in_out=false; _cur_svc=""; _cur_td=""
+            fi
+          fi
+        done < /tmp/terraform_output.txt
+        [ -n "$_cur_svc" ] && [ -z "${_SVC_TD[$_cur_svc]+x}" ] && {
+          _SVC_TD["$_cur_svc"]="$_cur_td"; _SVC_ORDER+=("$_cur_svc")
+        }
+
+        # Build rows from aggregated per-module data
+        MODULE_ROWS=""
+        RESOURCE_DETAILS=""
+        SLACK_DETAIL_LINES=""
+        for MOD in "${MODULE_ORDER[@]}"; do
+          ADD=${MOD_ADD[$MOD]}; CHANGE=${MOD_CHANGE[$MOD]}; DESTROY=${MOD_DESTROY[$MOD]}
+          TOTAL=$((ADD + CHANGE + DESTROY))
+          [ "$TOTAL" -gt 0 ] && CHANGED_MODULES=$((CHANGED_MODULES + 1))
+
+          if   [ "$TOTAL" -eq 0 ]; then MOD_STATUS="✅"
+          elif [ "$ADD" -gt 0 ] && [ "$CHANGE" -eq 0 ] && [ "$DESTROY" -eq 0 ]; then MOD_STATUS="➕"
+          elif [ "$CHANGE" -gt 0 ] && [ "$ADD" -eq 0 ] && [ "$DESTROY" -eq 0 ]; then MOD_STATUS="🔄"
+          elif [ "$DESTROY" -gt 0 ] && [ "$ADD" -eq 0 ] && [ "$CHANGE" -eq 0 ]; then MOD_STATUS="🗑️"
+          else MOD_STATUS="🔀"; fi
+
+          MODULE_ROWS+="| $MOD_STATUS \`$MOD\` | $ADD | $CHANGE | $DESTROY |"$'\n'
+
+          PENDING="${MOD_RES[$MOD]:-}"
+          if [ -n "$PENDING" ]; then
+            RESOURCE_DETAILS+="**$MOD_STATUS \`$MOD\`**"$'\n\n'
+            RESOURCE_DETAILS+="| | Resource | Changes |"$'\n'
+            RESOURCE_DETAILS+="|:---:|---------|---------|"$'\n'
+            SLACK_RES_PARTS=""
+            while IFS='|' read -r icon res attrs; do
+              [ -z "$res" ] && continue
+              RESOURCE_DETAILS+="| $icon | \`$res\` | ${attrs:--} |"$'\n'
+              PART="$icon \`$res\`"
+              [ -n "$attrs" ] && PART="$PART ($attrs)"
+              [ -n "$SLACK_RES_PARTS" ] && SLACK_RES_PARTS+=", "
+              SLACK_RES_PARTS+="$PART"
+            done <<< "$PENDING"
+            RESOURCE_DETAILS+=$'\n'
+            if [ "$TOTAL" -gt 0 ]; then
+              SLACK_DETAIL_LINES+="• *$MOD* (+$ADD ↻$CHANGE -$DESTROY): $SLACK_RES_PARTS"$'\n'
+            fi
+          elif [ "$TOTAL" -gt 0 ]; then
+            SLACK_DETAIL_LINES+="• *$MOD* (+$ADD ↻$CHANGE -$DESTROY)"$'\n'
+          fi
+        done
+
+        # ── GitHub Step Summary ────────────────────────────────────────────
+        {
+          echo "---"
+          echo "<details>"
+          echo "<summary>🏗️ Infrastructure Apply - $BADGE · ${{ github.actor }} · <a href=\"$COMMIT_URL\"><code>$SHORT_SHA</code></a></summary>"
+          echo ""
+          echo "| | |"
+          echo "|---|---|"
+          echo "| 🌍 **Environment** | $BADGE |"
+          echo "| 👤 **Triggered by** | ${{ github.actor }} |"
+          echo "| 📝 **Commit** | [\`$SHORT_SHA\`]($COMMIT_URL) |"
+          echo "| 🔗 **Job** | [View run]($JOB_URL) |"
+          echo ""
+
+          if [ -n "$MODULE_ROWS" ]; then
+            echo "#### 📦 Module Changes"
+            echo ""
+            echo "| Module | ➕ Added | 🔄 Changed | 🗑️ Destroyed |"
+            echo "|--------|:-------:|:----------:|:-----------:|"
+            echo -n "$MODULE_ROWS"
+            echo "| **Total** | **$TOTAL_ADD** | **$TOTAL_CHANGE** | **$TOTAL_DESTROY** |"
+            echo ""
+            echo "_${CHANGED_MODULES} module(s) changed · ${NO_CHANGE_MODULES} module(s) unchanged_"
+            echo ""
+            if [ "${#_SVC_ORDER[@]}" -gt 0 ]; then
+              echo "#### 🐳 Deployed Services"
+              echo ""
+              if [ -n "$_img_change" ]; then
+                echo "| Service | Task Definition | Image |"
+                echo "|---------|-----------------|-------|"
+                for _svc in "${_SVC_ORDER[@]}"; do
+                  echo "| \`$_svc\` | \`${_SVC_TD[$_svc]:--}\` | \`$_img_change\` |"
+                done
+              else
+                echo "| Service | Task Definition |"
+                echo "|---------|-----------------|"
+                for _svc in "${_SVC_ORDER[@]}"; do
+                  echo "| \`$_svc\` | \`${_SVC_TD[$_svc]:--}\` |"
+                done
+              fi
+              echo ""
+            fi
+          else
+            echo "✅ **No infrastructure changes** - all modules match configuration."
+          fi
+          echo ""
+          echo "</details>"
+        } >> $GITHUB_STEP_SUMMARY
+
+        {
+          echo "TOTAL_ADD=$TOTAL_ADD"
+          echo "TOTAL_CHANGE=$TOTAL_CHANGE"
+          echo "TOTAL_DESTROY=$TOTAL_DESTROY"
+          echo "CHANGED_MODULES=$CHANGED_MODULES"
+        } > /tmp/apply_counts.env
+        printf '%s' "$SLACK_DETAIL_LINES" > /tmp/module_slack_rows.txt
+
+    - name: Failure Summary
+      if: failure()
+      run: |
+        {
+          echo ""
+          echo "---"
+          echo "### ❌ Apply Failed"
+          echo ""
+          strip_ansi() { sed 's/\x1b\[[0-9;]*[mGKHFJA-Z]//g; s/\x1b\[?[0-9]*[hl]//g'; }
+
+          ERRORS=$(grep -E "(Error:|ERROR|╷|│)" /tmp/terraform_output.txt 2>/dev/null \
+            | strip_ansi | grep -v '^\s*$' | tail -30 || true)
+          if [ -n "$ERRORS" ]; then
+            echo "#### Error snippet"
+            echo '```'
+            echo "$ERRORS"
+            echo '```'
+            echo ""
+          fi
+          echo "<details>"
+          echo "<summary>📄 Last 60 lines of terraform output</summary>"
+          echo ""
+          echo '```'
+          tail -60 /tmp/terraform_output.txt 2>/dev/null | strip_ansi || echo "No output captured"
+          echo '```'
+          echo "</details>"
+        } >> $GITHUB_STEP_SUMMARY
+
+    - name: Wait for ECS service stability
+      env:
+        AWS_PROFILE: mave
+        INPUT_ENV: ${{ inputs.environment }}
+      run: |
+        ENV="$INPUT_ENV"
+
+        CLUSTER=$(aws ecs list-clusters --region us-east-1 \
+          --query "clusterArns[]" --output text \
+          | tr '\t' '\n' \
+          | grep -i "mave-api-cluster" | grep -i "$ENV" | head -1)
+
+        if [ -z "$CLUSTER" ]; then
+          echo "⚠️ Could not find ECS cluster for env $ENV - skipping"
+          exit 0
+        fi
+        echo "Cluster: $CLUSTER"
+
+        # Filter services by last ARN component containing 'mcp-server-repliers'
+        mapfile -t SERVICE_ARNS < <(
+          aws ecs list-services --cluster "$CLUSTER" --region us-east-1 \
+            --query "serviceArns[]" --output text \
+            | tr '\t' '\n' \
+            | awk -F'/' '$NF ~ /mcp-server-repliers/' || true
+        )
+
+        if [ ${#SERVICE_ARNS[@]} -eq 0 ]; then
+          echo "⚠️ No mcp-server-repliers services found for $ENV in cluster - skipping"
+          exit 0
+        fi
+        echo "Services to monitor for '$ENV' (${#SERVICE_ARNS[@]}):"
+        printf '  %s\n' "${SERVICE_ARNS[@]}"
+
+        echo "Waiting for all ECS services to reach steady state (timeout: 10 min)..."
+        aws ecs wait services-stable \
+          --cluster "$CLUSTER" \
+          --services "${SERVICE_ARNS[@]}" \
+          --region us-east-1 || echo "⚠️ wait timed out - checking deployment state..."
+
+        # ── Check each service ──────────────────────────────────────────────
+        {
+          echo ""
+          echo "---"
+          echo "### 🚀 ECS Service Health"
+          echo ""
+        } >> $GITHUB_STEP_SUMMARY
+
+        ROLLBACK_DETECTED=false
+        > /tmp/ecs_health.txt
+
+        for SERVICE_ARN in "${SERVICE_ARNS[@]}"; do
+          SVC_JSON=$(aws ecs describe-services \
+            --cluster "$CLUSTER" --services "$SERVICE_ARN" --region us-east-1 \
+            --output json)
+
+          DESIRED=$(echo "$SVC_JSON"     | jq '.services[0].desiredCount')
+          RUNNING=$(echo "$SVC_JSON"     | jq '.services[0].runningCount')
+          PENDING_CNT=$(echo "$SVC_JSON" | jq '.services[0].pendingCount')
+          SVC_NAME=$(echo "$SVC_JSON"    | jq -r '.services[0].serviceName')
+          ACTIVE_TD=$(echo "$SVC_JSON"   | jq -r '.services[0].taskDefinition')
+          ACTIVE_REV=$(basename "$ACTIVE_TD")
+
+          # Method 1: rolloutState=FAILED
+          FAILED_TD=$(echo "$SVC_JSON" | \
+            jq -r '.services[0].deployments[] | select(.rolloutState=="FAILED") | .taskDefinition' \
+            | head -1)
+
+          # Method 2: compare running vs latest registered revision
+          FAMILY=$(aws ecs describe-task-definition \
+            --task-definition "$ACTIVE_TD" --region us-east-1 \
+            --query 'taskDefinition.family' --output text 2>/dev/null || true)
+          if [ -n "$FAMILY" ]; then
+            LATEST_TD_ARN=$(aws ecs describe-task-definition \
+              --task-definition "$FAMILY" --region us-east-1 \
+              --query 'taskDefinition.taskDefinitionArn' --output text 2>/dev/null || true)
+            LATEST_REV=$(basename "${LATEST_TD_ARN:-$ACTIVE_TD}")
+          else
+            LATEST_REV="$ACTIVE_REV"
+          fi
+
+          ROLLBACK_REASON=""
+          if [ -n "$FAILED_TD" ]; then
+            ROLLBACK_REASON="rolloutState=FAILED ($(basename "$FAILED_TD"))"
+          elif [ "$ACTIVE_REV" != "$LATEST_REV" ]; then
+            ROLLBACK_REASON="running $ACTIVE_REV but latest registered is $LATEST_REV"
+          fi
+
+          if [ -n "$ROLLBACK_REASON" ]; then
+            ROLLBACK_DETECTED=true
+            SVC_STATUS="❌"
+            printf "❌ *%s*:\n%s\n" "$SVC_NAME" "$ROLLBACK_REASON" >> /tmp/ecs_health.txt
+          else
+            SVC_STATUS="✅"
+            echo "✅ *$SVC_NAME*: running \`$ACTIVE_REV\` ($RUNNING/$DESIRED)" >> /tmp/ecs_health.txt
+          fi
+
+          EVENTS=$(echo "$SVC_JSON" | \
+            jq -r '.services[0].events[0:3] | .[] | "• " + .message' 2>/dev/null || true)
+
+          {
+            echo "<details>"
+            echo "<summary>$SVC_STATUS <code>$SVC_NAME</code></summary>"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| 🏷️ **Running task def** | \`$ACTIVE_REV\` |"
+            echo "| 🏷️ **Latest registered** | \`$LATEST_REV\` |"
+            echo "| ✅ Running | $RUNNING / $DESIRED |"
+            echo "| ⏳ Pending | $PENDING_CNT |"
+            if [ -n "$ROLLBACK_REASON" ]; then
+              echo "| ❌ Rollback | $ROLLBACK_REASON |"
+            fi
+            if [ -n "$EVENTS" ]; then
+              echo ""
+              echo "**Recent events:**"
+              echo "$EVENTS"
+            fi
+            echo ""
+            echo "</details>"
+            echo ""
+          } >> $GITHUB_STEP_SUMMARY
+
+          echo "$SVC_STATUS $SVC_NAME: running=$RUNNING/$DESIRED active=$ACTIVE_REV latest=$LATEST_REV"
+          if [ -n "$ROLLBACK_REASON" ]; then
+            echo "  ❌ ROLLBACK: $ROLLBACK_REASON"
+          fi
+        done
+
+        if [ "$ROLLBACK_DETECTED" = true ]; then
+          echo "ECS_FAILED=true" > /tmp/ecs_failed.env
+          echo ""
+          echo "❌ ECS ROLLBACK DETECTED - service failed deployment"
+          echo "Check ECS console and the summary above for details."
+          exit 1
+        fi
+
+        echo "✅ All ECS services stable and running latest task definitions"
+
+    - name: Prepare Slack payload
+      if: failure()
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        GH_RUN_ID: ${{ github.run_id }}
+        GH_SERVER: ${{ github.server_url }}
+        GH_RUNNER: ${{ runner.name }}
+        GH_REF_NAME: ${{ github.ref_name }}
+        GH_ACTOR: ${{ github.actor }}
+        GH_SHA: ${{ github.sha }}
+        GH_COMMIT_MSG: ${{ github.event.head_commit.message }}
+        GH_REPO_NAME: ${{ github.event.repository.name }}
+        INPUT_ENV: ${{ inputs.environment }}
+      run: |
+        set +e
+        JOB_ID=$(curl -s \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/$GH_REPO/actions/runs/$GH_RUN_ID/jobs" \
+          2>/dev/null \
+          | jq -r --arg runner "$GH_RUNNER" \
+            '[.jobs[] | select(.runner_name == $runner)] | last | .id // empty' \
+            2>/dev/null)
+        JOB_URL="$GH_SERVER/$GH_REPO/actions/runs/$GH_RUN_ID"
+        [ -n "$JOB_ID" ] && JOB_URL="${JOB_URL}/job/${JOB_ID}"
+
+        ERROR_LOG=$(tail -30 /tmp/terraform_output.txt 2>/dev/null || echo "No output captured")
+        ECS_HEALTH=$(cat /tmp/ecs_health.txt 2>/dev/null || true)
+        ECS_FAILED=$(grep -c "ECS_FAILED=true" /tmp/ecs_failed.env 2>/dev/null || echo "0")
+
+        if [ "$ECS_FAILED" = "1" ] && [ -n "$ECS_HEALTH" ]; then
+          FAILURE_BLOCK=$(jq -n --arg health "$ECS_HEALTH" '{
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": (":rotating_light: *ECS Rollback Detected:*\n\n" + $health)}
+          }')
+        else
+          FAILURE_BLOCK=$(jq -n --arg error "$ERROR_LOG" '{
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ("*Error log:*\n```\n" + $error + "\n```")}
+          }')
+        fi
+
+        jq -n \
+          --arg env "$INPUT_ENV" \
+          --arg branch "$GH_REF_NAME" \
+          --arg actor "$GH_ACTOR" \
+          --arg sha "$GH_SHA" \
+          --arg commit_msg "$GH_COMMIT_MSG" \
+          --arg job_url "$JOB_URL" \
+          --arg commit_url "$GH_SERVER/$GH_REPO/commit/$GH_SHA" \
+          --arg repo "$GH_REPO_NAME" \
+          --argjson failure_block "$FAILURE_BLOCK" \
+          '{
+            "attachments": [{
+              "color": (if ($env | startswith("dev")) then "#ff9800" else "danger" end),
+              "blocks": [
+                {"type": "divider"},
+                {
+                  "type": "header",
+                  "text": {"type": "plain_text", "text": ((if ($env | startswith("dev")) then ":large_orange_circle:" else ":red_circle:" end) + " Terraform Apply " + $repo + " [" + $env + "] - failed on " + $branch), "emoji": true}
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {"type": "mrkdwn", "text": ("*Environment:*\n" + $env)},
+                    {"type": "mrkdwn", "text": ("*Triggered by:*\n" + $actor)}
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {"type": "mrkdwn", "text": ("*Commit message:*\n" + $commit_msg)},
+                    {"type": "mrkdwn", "text": ("<" + $job_url + "|View failed job>  |  <" + $commit_url + "|" + ($sha | .[0:7]) + ">")}
+                  ]
+                },
+                $failure_block
+              ]
+            }]
+          }' > /tmp/slack_payload.json
+        if [ ! -f /tmp/slack_payload.json ]; then
+          echo '{"text":":red_circle: *Terraform Apply* failed for ${{ inputs.environment }}. <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"}' > /tmp/slack_payload.json
+        fi
+
+    - name: Upload failure video to Slack
+      if: failure()
+      run: |
+        set +e
+        VIDEO=".github/assets/1000020962.mp4"
+        if [ ! -f "$VIDEO" ]; then echo "[info] No failure video found, skipping"; exit 0; fi
+        if [ -z "${{ secrets.SLACK_BOT_TOKEN }}" ]; then echo "[info] SLACK_BOT_TOKEN not set, skipping"; exit 0; fi
+
+        FILE_SIZE=$(stat -c%s "$VIDEO")
+
+        RESP=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+          -F "filename=1000020962.mp4" \
+          -F "length=$FILE_SIZE" \
+          https://slack.com/api/files.getUploadURLExternal)
+
+        UPLOAD_URL=$(echo "$RESP" | jq -r '.upload_url')
+        FILE_ID=$(echo "$RESP"   | jq -r '.file_id')
+
+        if [ -z "$UPLOAD_URL" ] || [ "$UPLOAD_URL" = "null" ]; then echo "[error] Failed to get upload URL"; exit 0; fi
+
+        UPLOAD_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$UPLOAD_URL" \
+          -H "Content-Type: video/mp4" \
+          --data-binary @"$VIDEO")
+
+        COMPLETE_RESP=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+          -H "Content-Type: application/json" \
+          -d "{\"files\":[{\"id\":\"$FILE_ID\"}],\"channel_id\":\"${{ secrets.SLACK_CHANNEL_ID }}\"}" \
+          https://slack.com/api/files.completeUploadExternal)
+        echo "[debug] completeUpload: $COMPLETE_RESP"
+
+    - name: Notify Slack on failure
+      if: failure()
+      continue-on-error: true
+      uses: slackapi/slack-github-action@v3
+      with:
+        webhook: ${{ secrets.SLACK_FAILURE_WEBHOOK_URL }}
+        webhook-type: incoming-webhook
+        payload-file-path: /tmp/slack_payload.json
+
+    - name: Prepare Slack success payload
+      if: success() && inputs.environment == 'production'
+      env:
+        GH_SERVER: ${{ github.server_url }}
+        GH_REPO: ${{ github.repository }}
+        GH_RUN_ID: ${{ github.run_id }}
+        GH_SHA: ${{ github.sha }}
+        GH_REF_NAME: ${{ github.ref_name }}
+        GH_ACTOR: ${{ github.actor }}
+        GH_COMMIT_MSG: ${{ github.event.head_commit.message }}
+        GH_REPO_NAME: ${{ github.event.repository.name }}
+      run: |
+        JOB_URL="$GH_SERVER/$GH_REPO/actions/runs/$GH_RUN_ID"
+        SHORT_SHA="$GH_SHA"
+        SHORT_SHA="${SHORT_SHA:0:7}"
+
+        jq -n \
+          --arg branch "$GH_REF_NAME" \
+          --arg actor "$GH_ACTOR" \
+          --arg commit_msg "$GH_COMMIT_MSG" \
+          --arg job_url "$JOB_URL" \
+          --arg commit_url "$GH_SERVER/$GH_REPO/commit/$GH_SHA" \
+          --arg repo "$GH_REPO_NAME" \
+          --arg short_sha "$SHORT_SHA" \
+          '{
+            "attachments": [{
+              "color": "good",
+              "blocks": [
+                {"type": "divider"},
+                {
+                  "type": "header",
+                  "text": {"type": "plain_text", "text": (":white_check_mark: " + $repo + " deployed to production"), "emoji": true}
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {"type": "mrkdwn", "text": ("*Triggered by:*\n" + $actor)},
+                    {"type": "mrkdwn", "text": ("<" + $job_url + "|View job>  |  <" + $commit_url + "|" + $short_sha + ">")}
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {"type": "mrkdwn", "text": $commit_msg}
+                }
+              ]
+            }]
+          }' > /tmp/slack_success_payload.json
+
+    - name: Notify Slack on success
+      if: success() && inputs.environment == 'production'
+      continue-on-error: true
+      uses: slackapi/slack-github-action@v3
+      with:
+        webhook: ${{ secrets.SLACK_SUCCESS_WEBHOOK_URL }}
+        webhook-type: incoming-webhook
+        payload-file-path: /tmp/slack_success_payload.json

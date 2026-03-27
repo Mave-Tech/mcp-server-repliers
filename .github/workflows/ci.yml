@@ -1,0 +1,369 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  ### Security check part ###
+  security-scan:
+    name: Security Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Security Secret Scanning (Gitleaks)
+        id: gitleaks
+        continue-on-error: true
+        run: |
+          VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | jq -r '.tag_name')
+          FILENAME="gitleaks_${VERSION#v}_linux_x64.tar.gz"
+          curl -sSLo "${FILENAME}" "https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/${FILENAME}"
+          curl -sSLo checksums.txt "https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VERSION#v}_checksums.txt"
+          sha256sum --check --ignore-missing checksums.txt
+          tar -xzf "${FILENAME}" gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+          gitleaks detect --source . --report-format json --report-path gitleaks.json \
+            --redact --no-banner 2>/dev/null || true
+
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔑 Gitleaks" >> $GITHUB_STEP_SUMMARY
+          if [ -f gitleaks.json ] && jq -e 'length > 0' gitleaks.json > /dev/null 2>&1; then
+            COUNT=$(jq 'length' gitleaks.json)
+            echo "<details><summary>❌ $COUNT secrets found</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Rule | File | Line |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|------|------|" >> $GITHUB_STEP_SUMMARY
+            jq -r '.[] | "| \(.RuleID) | `\(.File)` | \(.StartLine) |"' gitleaks.json >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "<details><summary>✅ no secrets found</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No leaked secrets detected." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Dependency Security Scan (npm audit)
+        id: npm_audit
+        continue-on-error: true
+        run: |
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 npm audit" >> $GITHUB_STEP_SUMMARY
+          if [ -f package.json ]; then
+            npm audit --json > audit.json 2>/dev/null || true
+            VULN_COUNT=$(jq '.metadata.vulnerabilities | (.critical // 0) + (.high // 0)' audit.json 2>/dev/null || echo 0)
+            CRITICAL=$(jq '.metadata.vulnerabilities.critical // 0' audit.json 2>/dev/null || echo 0)
+            HIGH=$(jq '.metadata.vulnerabilities.high // 0' audit.json 2>/dev/null || echo 0)
+            if [ "$VULN_COUNT" -gt 0 ]; then
+              echo "<details><summary>❌ $CRITICAL critical · $HIGH high vulnerabilities</summary>" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Package | Severity | CVE | Fix |" >> $GITHUB_STEP_SUMMARY
+              echo "|---------|----------|-----|-----|" >> $GITHUB_STEP_SUMMARY
+              jq -r '.vulnerabilities | to_entries[] | select(.value.severity == "critical" or .value.severity == "high") |
+                "| \(.key) | \(.value.severity) | \(.value.via[0].url // "-") | \(.value.fixAvailable // false) |"
+              ' audit.json 2>/dev/null >> $GITHUB_STEP_SUMMARY || true
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "</details>" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "<details><summary>✅ no critical/high vulnerabilities</summary>" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "No critical or high severity vulnerabilities found." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "</details>" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "<details><summary>⚠️ package.json not found</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Security JS SAST (Semgrep)
+        id: semgrep
+        continue-on-error: true
+        run: |
+          pip install semgrep -q
+          semgrep scan \
+            --config "p/javascript" \
+            --config "p/nodejs" \
+            --config "p/owasp-top-ten" \
+            --json \
+            --output semgrep.json \
+            --severity ERROR \
+            --severity WARNING \
+            --exclude '*.tf' \
+            --exclude '*.hcl' \
+            --exclude '.github/' \
+            --include '*.js' \
+            . 2>/dev/null || true
+
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "### 🛡️ Semgrep SAST" >> $GITHUB_STEP_SUMMARY
+          if [ -f semgrep.json ] && jq -e '.results | length > 0' semgrep.json > /dev/null 2>&1; then
+            ERROR_N=$(jq '[.results[] | select(.extra.severity=="ERROR")] | length' semgrep.json)
+            WARN_N=$(jq '[.results[] | select(.extra.severity=="WARNING")] | length' semgrep.json)
+            echo "<details><summary>🔴 $ERROR_N errors, 🟠 $WARN_N warnings</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Severity | Rule | File | Line | Message |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
+            jq -r '[.results[]] |
+              sort_by(if .extra.severity == "ERROR" then 0 else 1 end) | .[] |
+              (if .extra.severity=="ERROR" then "🔴 Error" else "🟠 Warning" end) as $sev |
+              "| \($sev) | \(.check_id | split(".")[-1]) | `\(.path)` | \(.start.line) | \(.extra.message | .[0:100]) |"
+            ' semgrep.json >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No security issues found." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Lint Dockerfile (Hadolint)
+        id: hadolint
+        continue-on-error: true
+        uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile
+          format: json
+          output-file: hadolint-results.json
+          no-fail: true
+
+      - name: Publish Hadolint Summary
+        if: always()
+        run: |
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "### 🐋 Hadolint" >> $GITHUB_STEP_SUMMARY
+          if [ -f hadolint-results.json ] && [ "$(jq 'length' hadolint-results.json 2>/dev/null || echo 0)" -gt 0 ]; then
+            ERRORS=$(jq '[.[] | select(.level=="error")] | length' hadolint-results.json)
+            WARNINGS=$(jq '[.[] | select(.level=="warning")] | length' hadolint-results.json)
+            INFO=$(jq '[.[] | select(.level=="info" or .level=="style")] | length' hadolint-results.json)
+            echo "<details><summary>🔴 $ERRORS errors, 🟠 $WARNINGS warnings, 🔵 $INFO info</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Level | Line | Code | Message |" >> $GITHUB_STEP_SUMMARY
+            echo "|-------|------|------|---------|" >> $GITHUB_STEP_SUMMARY
+            jq -r 'sort_by(if .level=="error" then 0 elif .level=="warning" then 1 else 2 end) | .[] |
+              (if .level=="error" then "🔴 error"
+               elif .level=="warning" then "🟠 warning"
+               else "🔵 \(.level)" end) as $lvl |
+              "| \($lvl) | \(.line) | [\(.code)](https://github.com/hadolint/hadolint/wiki/\(.code)) | \(.message) |"
+            ' hadolint-results.json >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "<details><summary>✅ no issues</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No Dockerfile issues found." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  test:
+    name: Build Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.DEPLOYER_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.DEPLOYER_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Docker image
+        run: |
+          docker buildx build \
+            --load \
+            --tag mave-mcp-server-repliers \
+            --cache-from "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mave-mcp-server-repliers:cache" \
+            --cache-to "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mave-mcp-server-repliers:cache,mode=max,image-manifest=true,oci-mediatypes=true" \
+            . 2>&1 | tee /tmp/docker_output.txt; exit ${PIPESTATUS[0]}
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+          trivy --version
+
+      - name: Security Scan Docker Image (Trivy)
+        id: trivy
+        continue-on-error: true
+        run: |
+          trivy image \
+            --format json \
+            --output trivy-image.json \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --quiet \
+            mave-mcp-server-repliers
+
+      - name: Publish Trivy Summary
+        if: always()
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "### 🐳 Trivy — Docker Image CVE Scan" >> $GITHUB_STEP_SUMMARY
+          if [ -f trivy-image.json ]; then
+            CRITICAL=$(jq '[.Results[] | (.Vulnerabilities // [])[] | select(.Severity=="CRITICAL")] | length' trivy-image.json 2>/dev/null || echo 0)
+            HIGH=$(jq '[.Results[] | (.Vulnerabilities // [])[] | select(.Severity=="HIGH")] | length' trivy-image.json 2>/dev/null || echo 0)
+            TOTAL=$((CRITICAL + HIGH))
+            if [ "$TOTAL" -gt 0 ]; then
+              echo "<details><summary>🔴 $CRITICAL critical · 🟠 $HIGH high CVEs</summary>" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Severity | Package | Installed | Fixed | CVE |" >> $GITHUB_STEP_SUMMARY
+              echo "|----------|---------|-----------|-------|-----|" >> $GITHUB_STEP_SUMMARY
+              jq -r '.Results[] | (.Vulnerabilities // [])[] |
+                (if .Severity=="CRITICAL" then "🔴 Critical" else "🟠 High" end) as $sev |
+                "| \($sev) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion // "N/A") | \(.VulnerabilityID) |"
+              ' trivy-image.json >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "</details>" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "<details><summary>✅ no critical/high CVEs</summary>" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "No unfixed critical or high vulnerabilities found in the Docker image." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "</details>" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Run container health check smoke test
+        id: smoke_test
+        continue-on-error: true
+        run: |
+          docker run -d \
+            --name mcp-test \
+            -p 8080:8080 \
+            -e REPLIERS_API_KEY="${{ secrets.REPLIERS_API_KEY }}" \
+            mave-mcp-server-repliers
+
+          echo "Waiting for container to start..."
+          sleep 5
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || echo "000")
+
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "### 🧪 Smoke Test" >> $GITHUB_STEP_SUMMARY
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "<details><summary>✅ /health returned 200</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Container started and health check passed." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "<details><summary>❌ /health returned $HTTP_STATUS</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Container logs:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            docker logs mcp-test 2>&1 | tail -30 >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          docker rm -f mcp-test 2>/dev/null || true
+
+      - name: Prepare Slack payload
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SERVER: ${{ github.server_url }}
+          GH_RUNNER: ${{ runner.name }}
+          GH_HEAD_REF: ${{ github.head_ref }}
+          GH_ACTOR: ${{ github.actor }}
+          GH_SHA: ${{ github.sha }}
+          GH_PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set +e
+          JOBS_JSON=$(curl -s \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GH_REPO/actions/runs/$GH_RUN_ID/jobs" \
+            2>/dev/null)
+
+          JOB_ID=$(echo "$JOBS_JSON" \
+            | jq -r --arg runner "$GH_RUNNER" \
+              '[.jobs[] | select(.runner_name == $runner)] | last | .id // empty' \
+              2>/dev/null)
+          JOB_URL="$GH_SERVER/$GH_REPO/actions/runs/$GH_RUN_ID"
+          [ -n "$JOB_ID" ] && JOB_URL="${JOB_URL}/job/${JOB_ID}"
+
+          FAILED_STEP=$(echo "$JOBS_JSON" \
+            | jq -r --arg runner "$GH_RUNNER" \
+              '[.jobs[] | select(.runner_name == $runner) | .steps // [] | .[] | select(.conclusion == "failure")] | first | .name // empty' \
+              2>/dev/null)
+
+          ERROR_LOG=$(tail -30 /tmp/docker_output.txt 2>/dev/null)
+          if [ -z "$ERROR_LOG" ]; then
+            if [ -n "$FAILED_STEP" ]; then
+              ERROR_LOG="Step failed: \"$FAILED_STEP\""
+            else
+              ERROR_LOG="No output captured — check job logs."
+            fi
+          fi
+          jq -n \
+            --arg branch "$GH_HEAD_REF" \
+            --arg actor "$GH_ACTOR" \
+            --arg sha "$GH_SHA" \
+            --arg commit_msg "$GH_PR_TITLE" \
+            --arg job_url "$JOB_URL" \
+            --arg commit_url "$GH_SERVER/$GH_REPO/commit/$GH_SHA" \
+            --arg repo "$GH_REPO_NAME" \
+            --arg error "$ERROR_LOG" \
+            '{
+              "attachments": [{
+                "color": "#ffcc00",
+                "blocks": [
+                  {"type": "divider"},
+                  {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": (":large_yellow_circle: CI " + $repo + " — Build failed on PR " + $branch), "emoji": true}
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {"type": "mrkdwn", "text": ("*Author:*\n" + $actor)},
+                      {"type": "mrkdwn", "text": ("*Commit:*\n<" + $commit_url + "|" + $sha + ">")}
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {"type": "mrkdwn", "text": ("*Commit message:*\n" + $commit_msg)},
+                      {"type": "mrkdwn", "text": ("<" + $job_url + "|View failed job>")}
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": ("*Error log:*\n```\n" + $error + "\n```")}
+                  }
+                ]
+              }]
+            }' > /tmp/slack_payload.json
+          if [ ! -f /tmp/slack_payload.json ]; then
+            echo '{"text":":large_yellow_circle: *CI* failed on PR ${{ github.head_ref }}. <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View logs>"}' > /tmp/slack_payload.json
+          fi
+
+      - name: Notify Slack on failure
+        if: failure()
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v3
+        with:
+          webhook: ${{ secrets.SLACK_FAILURE_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload-file-path: /tmp/slack_payload.json

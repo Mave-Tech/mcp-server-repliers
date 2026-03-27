@@ -1,0 +1,38 @@
+name: Deploy to PROD
+
+on:
+### Enable to deploy on prod by merging in MAIN ###
+  # # # push:
+  # # #   branches:
+  # # #     - main
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: string
+        default: 'production'
+        description: 'Environment to deploy (e.g., dev, production)'
+
+
+jobs:
+  push-to-ecr:
+    uses: ./.github/workflows/push_to_ecr.yml
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.DEPLOYER_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.DEPLOYER_AWS_SECRET_ACCESS_KEY }}
+      SLACK_FAILURE_WEBHOOK_URL: ${{ secrets.SLACK_FAILURE_WEBHOOK_URL }}
+
+  deploy-infrastructure:
+    needs: push-to-ecr
+    uses: ./.github/workflows/terraform_apply.yml
+    with:
+      environment: ${{ github.event.inputs.environment || 'production' }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.DEPLOYER_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.DEPLOYER_AWS_SECRET_ACCESS_KEY }}
+      GIT_INFRA_DEPLOY_KEY: ${{ secrets.GIT_INFRA_DEPLOY_KEY }}
+      SLACK_FAILURE_WEBHOOK_URL: ${{ secrets.SLACK_FAILURE_WEBHOOK_URL }}
+      SLACK_SUCCESS_WEBHOOK_URL: ${{ secrets.SLACK_SUCCESS_WEBHOOK_URL }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
