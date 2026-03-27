@@ -14,7 +14,7 @@ locals {
   tg_module          = "modules/aws_ecs_service"
   deploy_region_vars = read_terragrunt_config(find_in_parent_folders("deploy_region.hcl"))
   deploy_env_vars    = read_terragrunt_config(find_in_parent_folders("deploy_env.hcl"))
-  git_hash           = get_env("GIT_HASH", "0000000000000000000000000000000000000000")
+  git_hash           = get_env("GIT_HASH", "ca443bc86904ee38021a046a81581c1103e33ddb")
 
   region           = local.deploy_region_vars.locals.region
   name             = "${local.deploy_env_vars.locals.environment}-mave-mcp-server-repliers"
