@@ -25,7 +25,7 @@ inputs = {
   secret_names = [
     "aws_secret_access_key",
     "repliers_api_key",
-    "mcp_api_key"
+   # "mcp_api_key"
   ]
   tags = local.tags
 }
