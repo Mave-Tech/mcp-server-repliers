@@ -186,9 +186,9 @@ jobs:
         run: |
           docker buildx build \
             --load \
-            --tag mave-mcp-server-repliers \
-            --cache-from "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mave-mcp-server-repliers:cache" \
-            --cache-to "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mave-mcp-server-repliers:cache,mode=max,image-manifest=true,oci-mediatypes=true" \
+            --tag mcp-server-repliers \
+            --cache-from "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mcp-server-repliers:cache" \
+            --cache-to "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mcp-server-repliers:cache,mode=max,image-manifest=true,oci-mediatypes=true" \
             . 2>&1 | tee /tmp/docker_output.txt; exit ${PIPESTATUS[0]}
 
       - name: Install Trivy
@@ -207,7 +207,7 @@ jobs:
             --severity CRITICAL,HIGH \
             --ignore-unfixed \
             --quiet \
-            mave-mcp-server-repliers
+            mcp-server-repliers
 
       - name: Publish Trivy Summary
         if: always()
@@ -247,7 +247,7 @@ jobs:
             --name mcp-test \
             -p 8080:8080 \
             -e REPLIERS_API_KEY="${{ secrets.REPLIERS_API_KEY }}" \
-            mave-mcp-server-repliers
+            mcp-server-repliers
 
           echo "Waiting for container to start..."
           sleep 5
