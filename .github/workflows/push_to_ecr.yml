@@ -36,9 +36,9 @@ jobs:
         run: |
           docker buildx build \
             --push \
-            --tag "${{ steps.login-ecr.outputs.registry }}/mave-mcp-server-repliers:${{ github.sha }}" \
-            --cache-from "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mave-mcp-server-repliers:cache" \
-            --cache-to "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mave-mcp-server-repliers:cache,mode=max,image-manifest=true,oci-mediatypes=true" \
+            --tag "${{ steps.login-ecr.outputs.registry }}/mcp-server-repliers:${{ github.sha }}" \
+            --cache-from "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mcp-server-repliers:cache" \
+            --cache-to "type=registry,ref=${{ steps.login-ecr.outputs.registry }}/mcp-server-repliers:cache,mode=max,image-manifest=true,oci-mediatypes=true" \
             . 2>&1 | tee /tmp/docker_output.txt; exit ${PIPESTATUS[0]}
 
       - name: Prepare Slack payload
