@@ -80,7 +80,7 @@ inputs = {
       cpu         = 512
       memory      = 1024
       command     = ["node", "mcpServer.js", "--http"]
-      environment = []
+      environment = [{ name = "PORT", value = "8080" }]
       portMappings = [
         {
           containerPort = 8080
