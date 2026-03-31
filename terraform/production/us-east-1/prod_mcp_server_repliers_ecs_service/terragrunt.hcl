@@ -75,7 +75,7 @@ inputs = {
   container_definitions = jsonencode([
     {
       name        = "server"
-      image       = "471112786452.dkr.ecr.us-east-1.amazonaws.com/mave-mcp-server-repliers:${local.git_hash}"
+      image       = "471112786452.dkr.ecr.us-east-1.amazonaws.com/mcp-server-repliers:${local.git_hash}"
       essential   = true
       cpu         = 512
       memory      = 1024
