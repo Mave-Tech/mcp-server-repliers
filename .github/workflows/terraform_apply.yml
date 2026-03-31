@@ -99,6 +99,7 @@ jobs:
         GH_REPO: ${{ github.repository }}
         GH_RUN_ID: ${{ github.run_id }}
       run: |
+        touch /tmp/terraform_output.txt 2>/dev/null || true
         ENV="$INPUT_ENV"
         SHORT_SHA="$GH_SHA"
         SHORT_SHA="${SHORT_SHA:0:7}"
