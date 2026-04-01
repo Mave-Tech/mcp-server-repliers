@@ -694,7 +694,7 @@ jobs:
         payload-file-path: /tmp/slack_payload.json
 
     - name: Prepare Slack success payload
-      if: success() && inputs.environment == 'production'
+      if: false # temporarily disabled && success() && inputs.environment == 'production'
       env:
         GH_SERVER: ${{ github.server_url }}
         GH_REPO: ${{ github.repository }}
@@ -742,7 +742,7 @@ jobs:
           }' > /tmp/slack_success_payload.json
 
     - name: Notify Slack on success
-      if: success() && inputs.environment == 'production'
+      if: false # temporarily disabled && success() && inputs.environment == 'production'
       continue-on-error: true
       uses: slackapi/slack-github-action@v3
       with:
