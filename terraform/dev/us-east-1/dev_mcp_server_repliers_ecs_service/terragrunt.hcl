@@ -118,9 +118,9 @@ inputs = {
       name  = "REPLIERS_API_KEY"
       value = dependency.secrets.outputs.secret_values.repliers_api_key
     },
-    #{
-    #  name  = "MCP_API_KEY"
-    #  value = dependency.secrets.outputs.secret_values.mcp_api_key
-    #}
+    {
+      name  = "MCP_API_KEY"
+      value = dependency.secrets.outputs.secret_values.mcp_api_key
+    }
   ]
 }
