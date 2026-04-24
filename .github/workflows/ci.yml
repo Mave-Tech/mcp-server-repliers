@@ -308,14 +308,15 @@ jobs:
               '[.jobs[] | select(.runner_name == $runner) | .steps // [] | .[] | select(.conclusion == "failure")] | first | .name // empty' \
               2>/dev/null)
 
-          ERROR_LOG=$(tail -30 /tmp/docker_output.txt 2>/dev/null)
-          if [ -z "$ERROR_LOG" ]; then
-            if [ -n "$FAILED_STEP" ]; then
-              ERROR_LOG="Step failed: \"$FAILED_STEP\""
-            else
-              ERROR_LOG="No output captured — check job logs."
-            fi
+          # Collect error log from all known output files, fallback to failed step name
+          ERROR_LOG=""
+          for f in /tmp/docker_output.txt /tmp/trivy-image.json /tmp/semgrep.json; do
+            [ -s "$f" ] && ERROR_LOG=$(tail -30 "$f" 2>/dev/null) && break
+          done
+          if [ -z "$ERROR_LOG" ] && [ -n "$FAILED_STEP" ]; then
+            ERROR_LOG="Step failed: \"$FAILED_STEP\"\n\nCheck full logs at the job URL above."
           fi
+          [ -z "$ERROR_LOG" ] && ERROR_LOG="No output captured — check job logs."
           jq -n \
             --arg branch "$GH_HEAD_REF" \
             --arg actor "$GH_ACTOR" \
